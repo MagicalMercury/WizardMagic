@@ -12,14 +12,29 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Setup JDK 21
+      # 项目用 Java 17 toolchain（build.gradle 里 java.toolchain = 17）。
+      # 这里直接装 17，Gradle 与 toolchain 共用同一个 JDK，避免 foojay 每次下载工具链。
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: '17'
           distribution: 'temurin'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # gradlew 在仓库里是 100644（Windows 提交，无执行位），Linux runner 直接 ./gradlew 会 126。
+      # 同时仓库已执行 git update-index --chmod=+x gradlew，这里是双保险。
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
       - name: Build with Gradle
-        run: ./gradlew build
+        run: ./gradlew build --stacktrace --console=plain
+
+      - name: Upload jar
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wizardmagic-jar
+          path: build/libs/*.jar
+          if-no-files-found: warn

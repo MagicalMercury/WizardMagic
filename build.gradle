@@ -72,12 +72,16 @@ minecraft {
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 repositories {
-    // 镜像源优先：net.neoforged:forge（NeoForge 1.20.1 本体）及其 pom/userdev/universal/installer/sources
-    maven {
-        name = 'BMCLAPI'
-        url = 'https://bmclapi2.bangbang93.com/maven'
-        content {
-            includeGroupByRegex 'net\\.neoforged.*'
+    // 国内镜像只在本地开发时启用：GitHub Actions 的 runner 在海外，
+    // 访问 bmclapi 会先等 30 秒连接超时，拖慢甚至拖垮 CI。
+    if (System.getenv('CI') == null) {
+        // 镜像源优先：net.neoforged:forge（NeoForge 1.20.1 本体）及其 pom/userdev/universal/installer/sources
+        maven {
+            name = 'BMCLAPI'
+            url = 'https://bmclapi2.bangbang93.com/maven'
+            content {
+                includeGroupByRegex 'net\\.neoforged.*'
+            }
         }
     }
 
