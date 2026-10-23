@@ -56,6 +56,7 @@ public class WizardMagic
 
     private void commonSetup(final FMLCommonSetupEvent event)
     {
+        event.enqueueWork(com.wizardmagic.network.ModNetwork::register);
         LOGGER.info("Wizard Magic common setup");
     }
 
