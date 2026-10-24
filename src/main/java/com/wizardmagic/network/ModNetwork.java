@@ -24,5 +24,7 @@ public final class ModNetwork
         int id = 0;
         CHANNEL.registerMessage(id++, SparkPayload.class,
                 SparkPayload::encode, SparkPayload::decode, SparkPayload::handle);
+        CHANNEL.registerMessage(id++, ElementGlowPayload.class,
+                ElementGlowPayload::encode, ElementGlowPayload::decode, ElementGlowPayload::handle);
     }
 }

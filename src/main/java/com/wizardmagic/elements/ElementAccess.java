@@ -52,10 +52,9 @@ public final class ElementAccess
         }
         ElementField field = storage.get(sectionIndex);
         if (field == null) {
-            // 空气 section 不预生成（省内存），第一次被访问时才按群系+噪声+高度补上
-            if (!storage.isGenerated()) {
-                return null;
-            }
+            // 空气 section 不预生成（省内存），第一次被访问时才按群系+噪声+高度补上。
+            // 注意：这里不再要求 chunk 已经"预生成"——高空/远处的 section 就是靠这条路径
+            // 才存在的，getChunk 会阻塞到方块数据就绪，按需补算是安全的。
             LevelChunk chunk = level.getChunk(pos.getX() >> 4, pos.getZ() >> 4);
             ElementGeneration.generateSection(level, chunk, storage, sectionIndex);
             field = storage.get(sectionIndex);
