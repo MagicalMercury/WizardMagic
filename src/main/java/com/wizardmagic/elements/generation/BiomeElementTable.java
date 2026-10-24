@@ -74,4 +74,24 @@ public final class BiomeElementTable
     public static int[] defaults() {
         return DEFAULT;
     }
+
+    /**
+     * 表里出现的最大值（含默认值）。
+     *
+     * <p>用于把「群系 + 噪声」归一化到统一上限以下：生成时会乘以
+     * {@code limit / (maxValue + noiseAmplitude)}，这样各群系的相对高低保持不变，
+     * 但合计不会超过上限。</p>
+     */
+    public static int maxValue() {
+        int max = Integer.MIN_VALUE;
+        for (int v : DEFAULT) {
+            max = Math.max(max, v);
+        }
+        for (int[] values : TABLE.values()) {
+            for (int v : values) {
+                max = Math.max(max, v);
+            }
+        }
+        return Math.max(1, max);
+    }
 }

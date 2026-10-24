@@ -25,9 +25,26 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 public final class ElementGeneration
 {
     private static final int OCTAVES = 3;
+    /** 噪声幅度（归一化前的原始幅度） */
     private static final double NOISE_AMPLITUDE = 35.0;
     private static final long ELEMENT_SALT = 0x51ED2701L;
     private static final double SEA_LEVEL = 63.0;
+    /** 风在高度上限处达到的值（先慢后快，三次方曲线） */
+    private static final double WIND_MAX = 127.0;
+    /** 水在海平面处的增量峰值 */
+    private static final double WATER_PEAK = 60.0;
+    /** 水元素随高度衰减的尺度（格） */
+    private static final double WATER_SIGMA = 24.0;
+    /** 群系 + 噪声的合计上限：归一化后恒定不超过它 */
+    private static final double BASE_LIMIT = 48.0;
+    /**
+     * 归一化因子：原始最大可能值 = 群系最大 + 噪声幅度。
+     *
+     * <p>各群系的相对高低全部保留，只是整体缩放到上限以内，
+     * 所以「沙漠比森林土元素高」这类关系不会丢。</p>
+     */
+    private static final double BASE_SCALE =
+            BASE_LIMIT / (BiomeElementTable.maxValue() + NOISE_AMPLITUDE);
 
     /** 粗网格边长 */
     static final int COARSE = 4;
@@ -168,7 +185,7 @@ public final class ElementGeneration
         return out;
     }
 
-    /** 粗格：biome 基础值 + 噪声 + 高度风 */
+    /** 粗格：biome 基础值 + 噪声 + 高度项（风三次方到 127、水海平面高斯峰） */
     private static void fillCoarse(LevelChunk chunk, int sectionIndex, double[][][][] coarse) {
         long worldSeed = 0L;
         if (chunk.getLevel() instanceof ServerLevel serverLevel) {
@@ -178,6 +195,25 @@ public final class ElementGeneration
         int baseY = chunk.getMinBuildHeight() + (sectionIndex << 4);
         int chunkX = chunk.getPos().getMinBlockX();
         int chunkZ = chunk.getPos().getMinBlockZ();
+        int maxY = chunk.getLevel().getMaxBuildHeight();
+
+        // 高度加成按粗格 y 预计算：一个 section 只有 4 个 y，避免逐格算 exp / pow
+        double[] windBonus = new double[COARSE];
+        double[] waterBonus = new double[COARSE];
+        for (int gy = 0; gy < COARSE; gy++) {
+            int worldY = baseY + gy * CELL + CELL / 2;
+
+            // 风：海平面 0 → 高度上限 127，三次方「先慢后快」
+            double tw = (worldY - SEA_LEVEL) / Math.max(1.0, maxY - SEA_LEVEL);
+            if (tw > 0.0) {
+                tw = Math.min(1.0, tw);
+                windBonus[gy] = WIND_MAX * tw * tw * tw;
+            }
+
+            // 水：海平面处峰值，上下按高斯衰减
+            double dy = worldY - SEA_LEVEL;
+            waterBonus[gy] = WATER_PEAK * Math.exp(-(dy * dy) / (2.0 * WATER_SIGMA * WATER_SIGMA));
+        }
 
         for (int gx = 0; gx < COARSE; gx++) {
             for (int gy = 0; gy < COARSE; gy++) {
@@ -185,20 +221,20 @@ public final class ElementGeneration
                     int sampleX = chunkX + gx * CELL + CELL / 2;
                     int sampleY = baseY + gy * CELL + CELL / 2;
                     int sampleZ = chunkZ + gz * CELL + CELL / 2;
-                    int worldY = baseY + gy * CELL + CELL / 2;
 
                     int[] biomeBase = BiomeElementTable.base(
                             chunk.getNoiseBiome(sampleX >> 2, sampleY >> 2, sampleZ >> 2));
-                    double windBonus = Math.max(0.0, worldY - SEA_LEVEL) * 0.5;
 
                     double[] cell = coarse[gx][gy][gz];
                     for (int t = 0; t < COUNT; t++) {
                         double n = ElementNoise.fbm(
                                 worldSeed + ELEMENT_SALT + t * 7919L,
                                 sampleX, sampleY, sampleZ, OCTAVES);
-                        double value = biomeBase[t] + n * NOISE_AMPLITUDE;
+                        double value = (biomeBase[t] + n * NOISE_AMPLITUDE) * BASE_SCALE;
                         if (t == ElementTypes.Wind.ordinal()) {
-                            value += windBonus;
+                            value += windBonus[gy];
+                        } else if (t == ElementTypes.Water.ordinal()) {
+                            value += waterBonus[gy];
                         }
                         cell[t] = value;
                     }

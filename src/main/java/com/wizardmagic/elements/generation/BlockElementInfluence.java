@@ -122,7 +122,7 @@ public final class BlockElementInfluence
             return (30 << 8) | 1;
         }
         if (state.is(Blocks.LAVA)) {
-            return (26 << 8) | 0;
+            return (80 << 8) | 0;
         }
         if (state.hasProperty(AbstractFurnaceBlock.LIT) && state.getValue(AbstractFurnaceBlock.LIT)) {
             return (22 << 8) | 2;

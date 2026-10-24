@@ -38,8 +38,10 @@ public final class ElementFieldStorage
     private boolean generated;
 
     /** base 生成公式版本：低于当前版本说明是旧存档数据，需要重算
-     *  v3 = 强源半径按源类型；v4 = 稳态 section 不写盘 */
-    public static final int CURRENT_BASE_VERSION = 5;
+     *  v3 = 强源半径按源类型；v4 = 稳态 section 不写盘；
+     *  v5 = 合并插值/分离式插值；v6 = 群系+噪声归一化到 48、风三次方到 127、水海平面高斯峰；
+     *  v7 = 岩浆火元素强度 26 → 80 */
+    public static final int CURRENT_BASE_VERSION = 7;
 
     private int baseVersion;
 
