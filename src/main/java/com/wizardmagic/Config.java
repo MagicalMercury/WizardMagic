@@ -71,5 +71,9 @@ public class Config
             .comment("玩家周围保持活跃的 chunk 半径（0 表示只算玩家所在 chunk）")
             .defineInRange("elements.activeRadius", 2, 0, 16);
 
+    public static final ForgeConfigSpec.DoubleValue SPARK_MAX_DISTANCE = BUILDER
+            .comment("光点渲染的最大距离（格）；超过后不渲染，最后 30% 距离内淡出")
+            .defineInRange("fx.sparkMaxDistance", 64.0, 8.0, 512.0);
+
     public static final ForgeConfigSpec SPEC = BUILDER.build();
 }

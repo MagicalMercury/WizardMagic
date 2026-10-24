@@ -31,12 +31,16 @@ public final class SparkCommand
     private SparkCommand() {
     }
 
+    /** 不指定颜色时的默认色 */
+    private static final int DEFAULT_COLOR = 0x66CCFF;
+
     @SubscribeEvent
     public static void register(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
         dispatcher.register(Commands.literal("spark")
                 .then(Commands.literal("burst")
-                        .then(Commands.argument("count", IntegerArgumentType.integer(1, 131072))
+                        .then(Commands.argument("count", IntegerArgumentType.integer(1, 262144))
+                                .executes(ctx -> burst(ctx, 0.8f, DEFAULT_COLOR))
                                 .then(Commands.argument("color", ColorArgument.color())
                                         .executes(ctx -> burst(ctx, 0.8f))
                                         .then(Commands.argument("spread", FloatArgumentType.floatArg(0.0f, 16.0f))
@@ -48,8 +52,11 @@ public final class SparkCommand
     }
 
     private static int burst(CommandContext<CommandSourceStack> ctx, float spread) {
+        return burst(ctx, spread, ColorArgument.get(ctx, "color"));
+    }
+
+    private static int burst(CommandContext<CommandSourceStack> ctx, float spread, int color) {
         int count = IntegerArgumentType.getInteger(ctx, "count");
-        int color = ColorArgument.get(ctx, "color");
 
         CommandSourceStack source = ctx.getSource();
         ServerLevel level = source.getLevel();
@@ -57,11 +64,11 @@ public final class SparkCommand
         Entity entity = source.getEntity();
         if (entity != null) {
             // 与 /spark single 一致：从眼睛出发、沿视线前方 6 格爆发
-            pos = entity.getEyePosition().add(entity.getLookAngle().scale(6.0));
+            pos = entity.getEyePosition().add(entity.getLookAngle().scale(9.0));
         }
         SparkFx.burst(level, pos, count, color, spread, 0.35f, 0.35f, 50);
         source.sendSuccess(() -> Component.literal(String.format(
-                "已广播 %d 个光点（颜色 #%06X，散布 %.1f，视线前方 6 格）", count, color, spread)), false);
+                "已广播 %d 个光点（颜色 #%06X，散布 %.1f，视线前方 9 格）", count, color, spread)), false);
         return 1;
     }
 
