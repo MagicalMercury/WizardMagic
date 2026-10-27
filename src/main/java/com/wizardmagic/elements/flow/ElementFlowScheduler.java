@@ -5,6 +5,7 @@ import com.wizardmagic.elements.ElementAccess;
 import com.wizardmagic.elements.ElementField;
 import com.wizardmagic.elements.ElementFieldStorage;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
@@ -43,7 +44,9 @@ public final class ElementFlowScheduler
     private final Map<ResourceKey<Level>, List<ChunkPos>> ordered = new HashMap<>();
 
     private long tickCounter;
-    private long lastSortTick = Long.MIN_VALUE;
+    /** 上次排序的 gameTime。初始 0：now - 0 远大于 20，首 tick 就会重建缓存。
+     *  注意不能写 Long.MIN_VALUE —— now - Long.MIN_VALUE 会溢出成负数，导致永不重建。 */
+    private long lastSortTick = 0L;
 
     private ElementFlowScheduler()
     {
@@ -183,6 +186,7 @@ public final class ElementFlowScheduler
         }
     }
 
+    private static final ElementKernels KERNELS = ElementKernels.java();
     private static final int STATE_OK = 0;
     private static final int STATE_CLEAN = 1;
     private static final int STATE_GONE = 2;
@@ -209,22 +213,36 @@ public final class ElementFlowScheduler
         boolean fluxMode = Config.FLUX_MODE.get();
         double fluxRate = Config.FLUX_RATE.get();
         int fluxLimit = Config.FLUX_LIMIT.get();
-        for (ElementField field : storage.fields()) {
-            // 稳态 section（current == base）直接跳过，零开销
-            if (!field.isDirty()) {
+        ElementField[] sectionFields = storage.fields().toArray(new ElementField[0]);
+        for (int si = 0; si < sectionFields.length; si++) {
+            ElementField field = sectionFields[si];
+            boolean dirty = field.isDirty();
+            boolean cooled = now - field.getLastStepTick() >= cooldown;
+            // 既不脏、也没到冷却 → 完全跳过
+            if (!dirty && !cooled) {
                 continue;
             }
             anyDirty = true;
-
-            // 每个 section 自带冷却：扩散一次后必须等 flowCooldown tick 才能再动
-            if (now - field.getLastStepTick() < cooldown) {
+            if (!cooled) {
                 continue;
             }
             field.setLastStepTick(now);
 
-            boolean fieldChanged = fluxMode
-                    ? ElementDiffusion.stepFlux(field, fluxRate, fluxLimit, beta)
-                    : ElementDiffusion.step(field, alpha, beta);
+            boolean fieldChanged = false;
+            // 扩散只在有扰动时跑（稳态 section 省掉这一整遍）
+            if (dirty) {
+                fieldChanged = fluxMode
+                        ? KERNELS.stepFlux(field, fluxRate, fluxLimit, beta)
+                        : ElementDiffusion.step(field, alpha, beta);
+            }
+
+            // 平流独立于 dirty：流场一直在变，稳态 section 也会被搬运
+            BlockPos sectionOrigin = new BlockPos(
+                    pos.getMinBlockX(), si * 16, pos.getMinBlockZ());
+            if (ElementAdvection.advect(level, sectionOrigin, field, 1.0)) {
+                fieldChanged = true;
+            }
+
             if (fieldChanged) {
                 changed = true;
             } else {

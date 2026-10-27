@@ -62,10 +62,10 @@ public final class ElementGlowBroadcaster
     private static final int SECTION_BUDGET = 32;
 
     //                                   Earth Water Wind Fire
-    private static final int[] CELL_SIZE = {3, 7, 7, 2};
-    private static final int[] THRESHOLD = {80, 90, 80, 60};
-    private static final int[] LOW_COUNT = {1, 3, 3, 1};
-    private static final int[] HIGH_COUNT = {3, 10, 10, 3};
+    private static final int[] CELL_SIZE = {3, 7, 9, 2};
+    private static final int[] THRESHOLD = {80, 90, 67, 60};
+    private static final int[] LOW_COUNT = {1, 3, 4, 1};
+    private static final int[] HIGH_COUNT = {3, 10, 12, 3};
     /** 采样步长：元素场平滑，cell 越大越可以跳着采样 */
     private static final int[] SAMPLE_STEP = {2, 2, 2, 1};
     private static final int HIGH_THRESHOLD = 100;
@@ -74,6 +74,51 @@ public final class ElementGlowBroadcaster
     private static final double SCAN_RADIUS_SQ = SCAN_RADIUS * SCAN_RADIUS;
 
     private static final Logger LOGGER = LoggerFactory.getLogger("wizardmagic-fx");
+
+    /** 复用坐标对象，避免逐格 new BlockPos */
+    private static final BlockPos.MutableBlockPos PROBE = new BlockPos.MutableBlockPos();
+
+    /**
+     * per-section 四通道最大值缓存。
+     *
+     * <p>扫描成本主要在 16³ × 4 次 {@code field.get}；绝大多数 section 完全没有元素，
+     * 却每 10 tick 被完整扫一遍。这里把「这一段的四通道峰值」缓存下来，
+     * 低于全部阈值时整段跳过。缓存每 {@link #MAX_CACHE_PERIOD} 次广播清空一次，
+     * 让元素变化能在约 20 秒内反映出来（光点只是视觉，不需要更实时）。
+     */
+    private static final Map<Long, byte[]> MAX_CACHE = new HashMap<>();
+    private static final int MAX_CACHE_PERIOD = 40;
+    private static long cacheStamp;
+
+    private static byte[] sectionMax(ElementField field, int si, ChunkPos cp) {
+        long key = ((long) cp.x << 32) ^ ((long) cp.z << 8) ^ si;
+        byte[] cached = MAX_CACHE.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        byte[] mx = new byte[4];
+        for (int i = 0; i < ElementField.SIZE; i++) {
+            int fire = field.get(ElementTypes.Fire, i);
+            int wind = field.get(ElementTypes.Wind, i);
+            int water = field.get(ElementTypes.Water, i);
+            int earth = field.get(ElementTypes.Earth, i);
+            if (fire > mx[0]) mx[0] = (byte) fire;
+            if (wind > mx[1]) mx[1] = (byte) wind;
+            if (water > mx[2]) mx[2] = (byte) water;
+            if (earth > mx[3]) mx[3] = (byte) earth;
+        }
+        if (++cacheStamp % MAX_CACHE_PERIOD == 0) {
+            MAX_CACHE.clear();
+        }
+        MAX_CACHE.put(key, mx);
+        return mx;
+    }
+
+    private static void trimMaxCache() {
+        if (++cacheStamp % MAX_CACHE_PERIOD == 0) {
+            MAX_CACHE.clear();
+        }
+    }
 
     private static int tickCounter;
 
@@ -181,6 +226,19 @@ public final class ElementGlowBroadcaster
 
                 int baseY = minY + (si << 4);
 
+                // per-section 四通道最大值剪枝：整段都低于阈值就跳过 4×16³ 次采样。
+                byte[] sectionMax = sectionMax(field, si, chunk.getPos());
+                boolean anyAbove = false;
+                for (int t = 0; t < typeCount; t++) {
+                    if (sectionMax[t] >= THRESHOLD[t]) {
+                        anyAbove = true;
+                        break;
+                    }
+                }
+                if (!anyAbove) {
+                    continue;
+                }
+
                 for (int t = 0; t < typeCount; t++) {
                     int step = SAMPLE_STEP[t];
                     int cellSize = CELL_SIZE[t];
@@ -203,6 +261,14 @@ public final class ElementGlowBroadcaster
                                 double ddz = wz - pz;
                                 if (ddx * ddx + ddy * ddy + ddz * ddz > SCAN_RADIUS_SQ) {
                                     continue;
+                                }
+                                // 地元素只在实心方块上冒光：洞穴里的空气格不放光点，
+                                // 否则整条洞穴会被填满，看不出是「岩壁上冒出来的」。
+                                if (types[t] == ElementTypes.Earth) {
+                                    PROBE.set(wx, wy, wz);
+                                    if (level.getBlockState(PROBE).isAir()) {
+                                        continue;
+                                    }
                                 }
                                 long key = cellKey(wx, wy, wz, cellSize);
                                 Cell cell = cells.get(key);
@@ -232,11 +298,32 @@ public final class ElementGlowBroadcaster
         candidates.sort(Comparator.comparingDouble(Candidate::distSq));
         int limit = Math.min(MAX_CELLS, candidates.size());
         List<long[]> out = new ArrayList<>(limit);
+        com.wizardmagic.elements.fluid.FluidField fluid =
+                com.wizardmagic.elements.fluid.FluidManager.field();
+        float[] vel = new float[3];
         for (int i = 0; i < limit; i++) {
             Candidate candidate = candidates.get(i);
-            out.add(new long[]{candidate.pos(), candidate.type(), candidate.count()});
+            long p = candidate.pos();
+            long qx = 0;
+            long qy = 0;
+            long qz = 0;
+            if (fluid != null) {
+                fluid.sample(net.minecraft.core.BlockPos.getX(p) + 0.5,
+                        net.minecraft.core.BlockPos.getY(p) + 0.5,
+                        net.minecraft.core.BlockPos.getZ(p) + 0.5, vel);
+                qx = quantize(vel[0]);
+                qy = quantize(vel[1]);
+                qz = quantize(vel[2]);
+            }
+            out.add(new long[]{p, candidate.type(), candidate.count(), qx, qy, qz});
         }
         return out;
+    }
+
+    /** 速度量化到 int8，精度 1/60 格每秒。 */
+    private static long quantize(float v) {
+        int q = Math.round(v * 60.0f);
+        return Math.max(-127, Math.min(127, q));
     }
 
     private static long cellKey(int x, int y, int z, int cellSize) {

@@ -29,12 +29,20 @@ public final class ElementGeneration
     private static final double NOISE_AMPLITUDE = 35.0;
     private static final long ELEMENT_SALT = 0x51ED2701L;
     private static final double SEA_LEVEL = 63.0;
-    /** 风在高度上限处达到的值（先慢后快，三次方曲线） */
+    /** 风在高度上限处达到的值（基线 + 陡升，接近上限才大量聚集） */
     private static final double WIND_MAX = 127.0;
+    /** 风的地表基线：让海平面一带也能压线出少量光点 */
+    private static final double WIND_BASE = 45.0;
+    /** 基线之上还要涨的部分 */
+    private static final double WIND_RISE = WIND_MAX - WIND_BASE;
     /** 水在海平面处的增量峰值 */
     private static final double WATER_PEAK = 60.0;
     /** 水元素随高度衰减的尺度（格） */
     private static final double WATER_SIGMA = 24.0;
+    /** 地元素：深板岩区峰值高度、衰减尺度、峰值增量 */
+    private static final double EARTH_PEAK_Y = -32.0;
+    private static final double EARTH_SIGMA = 48.0;
+    private static final double EARTH_PEAK = 50.0;
     /** 群系 + 噪声的合计上限：归一化后恒定不超过它 */
     private static final double BASE_LIMIT = 48.0;
     /**
@@ -200,19 +208,28 @@ public final class ElementGeneration
         // 高度加成按粗格 y 预计算：一个 section 只有 4 个 y，避免逐格算 exp / pow
         double[] windBonus = new double[COARSE];
         double[] waterBonus = new double[COARSE];
+        double[] earthBonus = new double[COARSE];
         for (int gy = 0; gy < COARSE; gy++) {
             int worldY = baseY + gy * CELL + CELL / 2;
 
-            // 风：海平面 0 → 高度上限 127，三次方「先慢后快」
-            double tw = (worldY - SEA_LEVEL) / Math.max(1.0, maxY - SEA_LEVEL);
-            if (tw > 0.0) {
-                tw = Math.min(1.0, tw);
-                windBonus[gy] = WIND_MAX * tw * tw * tw;
+            // 风：海平面以下从 0 线性升到基线；以上先平台、接近上限时四次方陡升。
+            // 这样地表能压线出少量光点，大量聚集集中在 y > 250 的高空。
+            if (worldY <= SEA_LEVEL) {
+                windBonus[gy] = WIND_BASE * Math.max(0.0, worldY) / SEA_LEVEL;
+            } else {
+                double tw = Math.min(1.0, (worldY - SEA_LEVEL) / Math.max(1.0, maxY - SEA_LEVEL));
+                double t2 = tw * tw;
+                windBonus[gy] = WIND_BASE + WIND_RISE * t2 * t2;
             }
 
             // 水：海平面处峰值，上下按高斯衰减
             double dy = worldY - SEA_LEVEL;
             waterBonus[gy] = WATER_PEAK * Math.exp(-(dy * dy) / (2.0 * WATER_SIGMA * WATER_SIGMA));
+
+            // 地：深板岩区（y≈-32）为峰值，向上到地表、向下到基岩都衰减。
+            // 地表 y=63 只剩约 2% 的加成，深板岩区约 100%。
+            double de = (worldY - EARTH_PEAK_Y) / EARTH_SIGMA;
+            earthBonus[gy] = EARTH_PEAK * Math.exp(-de * de);
         }
 
         for (int gx = 0; gx < COARSE; gx++) {
@@ -235,6 +252,8 @@ public final class ElementGeneration
                             value += windBonus[gy];
                         } else if (t == ElementTypes.Water.ordinal()) {
                             value += waterBonus[gy];
+                        } else if (t == ElementTypes.Earth.ordinal()) {
+                            value += earthBonus[gy];
                         }
                         cell[t] = value;
                     }

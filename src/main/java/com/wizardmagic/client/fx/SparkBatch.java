@@ -322,17 +322,19 @@ public final class SparkBatch
     }
 
     private int writeInstance(Spark spark, int idx) {
-        // 布局必须与 SparkInstancedRenderer / spark 着色器一致（14 float）
+        // 布局必须与 SparkInstancedRenderer / spark 着色器一致（11 float / 44 字节）
         instanceData[idx++] = (float) spark.x;
         instanceData[idx++] = (float) spark.y;
         instanceData[idx++] = (float) spark.z;
         instanceData[idx++] = (float) spark.prevX;
         instanceData[idx++] = (float) spark.prevY;
         instanceData[idx++] = (float) spark.prevZ;
-        instanceData[idx++] = spark.r;
-        instanceData[idx++] = spark.g;
-        instanceData[idx++] = spark.b;
-        instanceData[idx++] = spark.alphaMul;
+        // 颜色 4 通道压成 4 个字节（小端序 → 内存里就是 r,g,b,a），shader 侧仍是 vec4
+        int cr = (int) (spark.r * 255.0f + 0.5f);
+        int cg = (int) (spark.g * 255.0f + 0.5f);
+        int cb = (int) (spark.b * 255.0f + 0.5f);
+        int ca = (int) (spark.alphaMul * 255.0f + 0.5f);
+        instanceData[idx++] = Float.intBitsToFloat(cr | (cg << 8) | (cb << 16) | (ca << 24));
         instanceData[idx++] = spark.size;
         instanceData[idx++] = spark.birth;
         instanceData[idx++] = spark.life;

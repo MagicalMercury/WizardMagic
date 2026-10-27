@@ -13,11 +13,15 @@ import com.wizardmagic.elements.ElementTypes;
  * <p>越界（section 边界外）用当前格自己的 {@code base} 当邻居，
  * 等价于「无穷远边界」，避免为了扩散强制加载邻 chunk。</p>
  *
- * <p>采用「先采样旧值再原地写」，避免方向偏差。</p>
+ * <p>存储是「每格一个 int、四元素各 8 bit」（见 {@link ElementField}）：
+ * 一次遍历就处理完四个元素，邻居格也只读一次 int，访存次数是原来 byte[4][4096]
+ * 布局的 1/4。</p>
  */
 public final class ElementDiffusion
 {
-    private static final ElementTypes[] TYPES = ElementTypes.values();
+    private static final int COUNT = ElementTypes.COUNT;
+    private static final int MASK = 0x7F;
+    private static final int ALL_MASK = 0x7F7F7F7F;
 
     /** 6 邻域偏移 */
     private static final int[][] NEIGHBORS = {
@@ -38,110 +42,159 @@ public final class ElementDiffusion
      * @param beta     回流系数
      */
     public static boolean stepFlux(ElementField field, double rate, int maxFlux, double beta) {
+        long t0 = System.nanoTime();
         boolean changed = false;
 
-        for (ElementTypes type : TYPES) {
-            byte[] current = field.currentArray(type);
-            byte[] base = field.baseArray(type);
+        int[] current = field.currentWords();
+        int[] base = field.baseWords();
 
-            for (int index = 0; index < ElementField.SIZE; index++) {
-                int value = current[index] & 0x7F;
-                if (value <= 0) {
-                    continue;
+        // 定点化：内层不再出现 double，差值 * rate 用 (diff * rateQ) >> 8 近似
+        final int rateQ = Math.max(1, (int) Math.round(rate * 256.0));
+        final int limit = Math.max(1, maxFlux);
+        final int betaQ = Math.max(0, (int) Math.round(beta * 256.0));
+
+        for (int index = 0; index < ElementField.SIZE; index++) {
+            int word = current[index];
+            if ((word & ALL_MASK) == 0) {
+                continue; // 四元素全 0，整格跳过
+            }
+            int x = index & 15;
+            int y = (index >> 4) & 15;
+            int z = index >> 8;
+
+            // 6 邻居改为索引算术（±1 / ±16 / ±256），不再走 NEIGHBORS 数组与 xyz 解码
+            for (int dir = 0; dir < 6; dir++) {
+                int neighborIndex;
+                switch (dir) {
+                    case 0 -> { if (x == 15) continue; neighborIndex = index + 1; }
+                    case 1 -> { if (x == 0) continue; neighborIndex = index - 1; }
+                    case 2 -> { if (y == 15) continue; neighborIndex = index + 16; }
+                    case 3 -> { if (y == 0) continue; neighborIndex = index - 16; }
+                    case 4 -> { if (z == 15) continue; neighborIndex = index + 256; }
+                    default -> { if (z == 0) continue; neighborIndex = index - 256; }
                 }
-                int x = ElementField.x(index);
-                int y = ElementField.y(index);
-                int z = ElementField.z(index);
 
-                for (int[] offset : NEIGHBORS) {
-                    int nx = x + offset[0];
-                    int ny = y + offset[1];
-                    int nz = z + offset[2];
-                    if (nx < 0 || ny < 0 || nz < 0 || nx > 15 || ny > 15 || nz > 15) {
+                int neighborWord = current[neighborIndex];
+
+                for (int t = 0; t < COUNT; t++) {
+                    int shift = t * 8;
+                    int from = (word >>> shift) & MASK;
+                    if (from <= 0) {
                         continue;
                     }
-
-                    int from = current[index] & 0x7F;
-                    int neighborIndex = ElementField.index(nx, ny, nz);
-                    int neighborValue = current[neighborIndex] & 0x7F;
+                    int neighborValue = (neighborWord >>> shift) & MASK;
                     int diff = from - neighborValue;
                     if (diff <= 0) {
                         continue;
                     }
 
-                    // 提取比例后不足 1 点就不再扩散：
-                    // 差值 < 1/rate（默认约 2.9）时停止，扩散自然有有限半径
-                    double raw = diff * rate;
-                    if (raw < 1.0) {
+                    // 提取比例后不足 1 点就不再扩散（等价于旧的 raw < 1.0）
+                    int move = (diff * rateQ) >> 8;
+                    if (move <= 0) {
                         continue;
                     }
-                    int move = Math.min((int) raw, maxFlux);
-                    if (move <= 0 || move > from) {
-                        continue;
+                    if (move > limit) {
+                        move = limit;
+                    }
+                    if (move > from) {
+                        move = from;
                     }
 
-                    current[index] = (byte) ElementTypes.clamp(from - move);
-                    current[neighborIndex] = (byte) ElementTypes.clamp(neighborValue + move);
+                    word = ElementField.setElem(word, shift, from - move);
+                    neighborWord = ElementField.setElem(neighborWord, shift, neighborValue + move);
+                    current[neighborIndex] = neighborWord;
                     changed = true;
                 }
             }
+            current[index] = word;
+        }
 
-            // 源项回流（把被抽低/堆高的格子缓慢拉回 base）
-            for (int index = 0; index < ElementField.SIZE; index++) {
-                int value = current[index] & 0x7F;
-                int baseValue = base[index] & 0x7F;
+        // 源项回流（把被抽低/堆高的格子缓慢拉回 base）
+        for (int index = 0; index < ElementField.SIZE; index++) {
+            int word = current[index];
+            int baseWord = base[index];
+            if (word == baseWord) {
+                continue;
+            }
+            int out = word;
+            boolean any = false;
+            for (int t = 0; t < COUNT; t++) {
+                int shift = t * 8;
+                int value = (word >>> shift) & MASK;
+                int baseValue = (baseWord >>> shift) & MASK;
                 if (value == baseValue) {
                     continue;
                 }
-                int next = (int) Math.round(value + beta * (baseValue - value));
+                int delta = baseValue - value;
+                int next = value + ((delta * betaQ) >> 8);
                 if (next != value) {
-                    current[index] = (byte) ElementTypes.clamp(next);
-                    changed = true;
+                    out = ElementField.setElem(out, shift, next);
+                    any = true;
                 }
+            }
+            if (any) {
+                current[index] = out;
+                changed = true;
             }
         }
 
+        ElementBudget.record("flow", System.nanoTime() - t0);
         return changed;
     }
 
+    /**
+     * 拉普拉斯式扩散（旧模型，默认不走这条路径；保留给调试对比）。
+     * 用 {@code scratch} 保存旧值，避免方向偏差。
+     */
     public static boolean step(ElementField field, double alpha, double beta) {
         boolean changed = false;
-        for (ElementTypes type : TYPES) {
-            byte[] current = field.currentArray(type);
-            byte[] base = field.baseArray(type);
-            byte[] previous = field.scratchArray(type);
-            System.arraycopy(current, 0, previous, 0, ElementField.SIZE);
 
-            for (int index = 0; index < ElementField.SIZE; index++) {
-                int x = ElementField.x(index);
-                int y = ElementField.y(index);
-                int z = ElementField.z(index);
+        int[] current = field.currentWords();
+        int[] base = field.baseWords();
+        int[] previous = field.scratchWords();
+        System.arraycopy(current, 0, previous, 0, ElementField.SIZE);
 
-                int value = previous[index] & 0x7F;
-                int baseValue = base[index] & 0x7F;
+        for (int index = 0; index < ElementField.SIZE; index++) {
+            int word = previous[index];
+            int baseWord = base[index];
+            int out = word;
+            boolean any = false;
+
+            int x = ElementField.x(index);
+            int y = ElementField.y(index);
+            int z = ElementField.z(index);
+
+            for (int t = 0; t < COUNT; t++) {
+                int shift = t * 8;
+                int value = (word >>> shift) & MASK;
+                int baseValue = (baseWord >>> shift) & MASK;
 
                 int sum = 0;
-                int count = 0;
-                for (int[] offset : NEIGHBORS) {
+                for (int n = 0; n < NEIGHBORS.length; n++) {
+                    int[] offset = NEIGHBORS[n];
                     int nx = x + offset[0];
                     int ny = y + offset[1];
                     int nz = z + offset[2];
                     if (nx < 0 || ny < 0 || nz < 0 || nx > 15 || ny > 15 || nz > 15) {
                         sum += baseValue;
                     } else {
-                        sum += previous[ElementField.index(nx, ny, nz)] & 0x7F;
+                        sum += (previous[ElementField.index(nx, ny, nz)] >>> shift) & MASK;
                     }
-                    count++;
                 }
 
-                double diffusion = alpha * (sum - (double) count * value);
+                double diffusion = alpha * (sum - (double) NEIGHBORS.length * value);
                 double source = beta * (baseValue - value);
                 int next = (int) Math.round(value + diffusion + source);
-                byte packed = (byte) ElementTypes.clamp(next);
-                if (packed != current[index]) {
-                    changed = true;
+                int clamped = ElementTypes.clamp(next) & MASK;
+                if (clamped != value) {
+                    out = ElementField.setElem(out, shift, clamped);
+                    any = true;
                 }
-                current[index] = packed;
+            }
+
+            if (any) {
+                current[index] = out;
+                changed = true;
             }
         }
         return changed;

@@ -117,10 +117,24 @@ public final class ElementCommand
         long processedTotal = ElementRefreshQueue.totalProcessed();
         int hotCount = ElementFlowScheduler.INSTANCE.hotCount();
         double[] timing = com.wizardmagic.elements.generation.ElementGeneration.averageTiming();
-        context.getSource().sendSuccess(() -> Component.literal(String.format(
-                "元素场：活跃=%d(hot %d) 待生成=%d 待重算=%d（入队 %d / 重算 %d）| 分段 ms: noise=%.3f conv=%.3f interp=%.3f hot=%.3f",
+        String flowStat = com.wizardmagic.elements.flow.ElementBudget.summary("flow");
+        String advStat = com.wizardmagic.elements.flow.ElementBudget.summary("adv");
+        String fluidStat = com.wizardmagic.elements.flow.ElementBudget.summary("fluid.total");
+        String elementLine = String.format(
+                "元素场：活跃=%d(hot %d) 待生成=%d 待重算=%d（入队 %d / 重算 %d）| noise=%.3f conv=%.3f interp=%.3f hot=%.3f | adv %s | flow %s | %s",
                 active, hotCount, queued, pendingRefresh, enqueuedTotal, processedTotal,
-                timing[0], timing[1], timing[2], timing[3])), false);
+                timing[0], timing[1], timing[2], timing[3], advStat, flowStat, fluidStat);
+        String fluidLine = com.wizardmagic.elements.fluid.FluidManager.stats();
+        // 完整数据只进日志（INFO），聊天面板给一行摘要
+        com.mojang.logging.LogUtils.getLogger().info("[wizardmagic] {}", elementLine);
+        com.mojang.logging.LogUtils.getLogger().info("[wizardmagic] {}", fluidLine);
+        String shortLine = String.format(
+                "元素场 活跃=%d 待重算=%d | adv %s | flow %s | fluid %s (ms p50/p99)",
+                active, pendingRefresh,
+                com.wizardmagic.elements.flow.ElementBudget.shortSummary("adv"),
+                com.wizardmagic.elements.flow.ElementBudget.shortSummary("flow"),
+                com.wizardmagic.elements.flow.ElementBudget.shortSummary("fluid.total"));
+        context.getSource().sendSuccess(() -> Component.literal(shortLine), false);
         return 1;
     }
 

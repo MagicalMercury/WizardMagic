@@ -42,8 +42,13 @@ public final class ElementTickHandler
 
         MinecraftServer server = event.getServer();
         for (ServerLevel level : server.getAllLevels()) {
-            ElementFlowScheduler.INSTANCE.tick(level);
+            elementFlow(level);
+            com.wizardmagic.elements.fluid.FluidManager.tick(level);
         }
+    }
+
+    private static void elementFlow(ServerLevel level) {
+        ElementFlowScheduler.INSTANCE.tick(level);
     }
 
     @SubscribeEvent

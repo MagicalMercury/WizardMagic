@@ -5,6 +5,7 @@ bin
 .metadata
 .classpath
 .project
+.screenshots
 
 # idea
 out
@@ -26,3 +27,4 @@ run-data
 plan
 repo
 backups
+verify

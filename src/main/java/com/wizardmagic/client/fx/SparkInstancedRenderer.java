@@ -7,6 +7,7 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL30;
+import org.lwjgl.opengl.GL30C;
 import org.lwjgl.opengl.GL31C;
 import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
@@ -34,8 +35,8 @@ public final class SparkInstancedRenderer
 {
     private static final Logger LOGGER = LoggerFactory.getLogger("wizardmagic-fx");
 
-    public static final int FLOATS_PER_INSTANCE = 14;
-    public static final int BYTES_PER_INSTANCE = FLOATS_PER_INSTANCE * Float.BYTES; // 56
+    public static final int FLOATS_PER_INSTANCE = 11;
+    public static final int BYTES_PER_INSTANCE = FLOATS_PER_INSTANCE * Float.BYTES; // 44
 
     private static int vao = -1;
     private static int quadVbo;
@@ -87,12 +88,13 @@ public final class SparkInstancedRenderer
             GL20.glVertexAttribPointer(3, 3, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, 12L);
             ARBInstancedArrays.glVertexAttribDivisorARB(3, 1);
 
+            // 颜色压成 4 个归一化字节（1 float 的宽度），着色器侧仍是 vec4
             GL20.glEnableVertexAttribArray(4);
-            GL20.glVertexAttribPointer(4, 4, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, 24L);
+            GL20.glVertexAttribPointer(4, 4, GL11.GL_UNSIGNED_BYTE, true, BYTES_PER_INSTANCE, 24L);
             ARBInstancedArrays.glVertexAttribDivisorARB(4, 1);
 
             GL20.glEnableVertexAttribArray(5);
-            GL20.glVertexAttribPointer(5, 4, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, 40L);
+            GL20.glVertexAttribPointer(5, 4, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, 28L);
             ARBInstancedArrays.glVertexAttribDivisorARB(5, 1);
 
             GL30.glBindVertexArray(0);
@@ -112,7 +114,7 @@ public final class SparkInstancedRenderer
     /** 每批上传的实例数（64K × 56B ≈ 3.6 MB，避免单次大拷贝的驱动尖峰） */
     private static final int UPLOAD_CHUNK_INSTANCES = 65536;
 
-    /** 上传实例数据（只在 tick 改过时调用）；分块 glBufferSubData，允许只传前 count 个（就近优先） */
+    /** 上传实例数据（只在 tick 改过时调用）；分块上传，允许只传前 count 个（就近优先） */
     public static void upload(float[] source, int count) {
         if (instanceBuffer == null) {
             return;
@@ -125,11 +127,29 @@ public final class SparkInstancedRenderer
         try {
             for (int offset = 0; offset < floats; offset += chunkFloats) {
                 int n = Math.min(chunkFloats, floats - offset);
-                instanceBuffer.clear();
-                instanceBuffer.put(source, offset, n);
-                instanceBuffer.flip();
-                GL15.glBufferSubData(GL15.GL_ARRAY_BUFFER,
-                        (long) offset * Float.BYTES, instanceBuffer);
+                long byteOffset = (long) offset * Float.BYTES;
+                long byteLength = (long) n * Float.BYTES;
+                // 首选映射直写：省掉 float[] → direct buffer 的一次拷贝
+                boolean mapped = false;
+                try {
+                    java.nio.ByteBuffer target = GL30C.glMapBufferRange(GL15.GL_ARRAY_BUFFER,
+                            byteOffset, byteLength,
+                            GL30C.GL_MAP_WRITE_BIT | GL30C.GL_MAP_INVALIDATE_RANGE_BIT);
+                    if (target != null) {
+                        java.nio.FloatBuffer view = target.order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer();
+                        view.put(source, offset, n);
+                        GL15.glUnmapBuffer(GL15.GL_ARRAY_BUFFER);
+                        mapped = true;
+                    }
+                } catch (Throwable ignored) {
+                    // 驱动不支持映射 → 回退到 glBufferSubData
+                }
+                if (!mapped) {
+                    instanceBuffer.clear();
+                    instanceBuffer.put(source, offset, n);
+                    instanceBuffer.flip();
+                    GL15.glBufferSubData(GL15.GL_ARRAY_BUFFER, byteOffset, instanceBuffer);
+                }
             }
         } finally {
             GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);

@@ -28,6 +28,26 @@ public final class BlockElementInfluence
     /** 每 section 最多处理多少个强源 */
     private static final int MAX_SOURCES = 256;
 
+    /** 矿石每格额外提供的土元素（不做半径衰减） */
+    private static final int ORE_EARTH_BONUS = 10;
+
+    /** 所有矿石方块：只按自身格子加土元素 */
+    private static final java.util.Set<net.minecraft.world.level.block.Block> ORES = java.util.Set.of(
+            Blocks.COAL_ORE, Blocks.DEEPSLATE_COAL_ORE,
+            Blocks.IRON_ORE, Blocks.DEEPSLATE_IRON_ORE,
+            Blocks.COPPER_ORE, Blocks.DEEPSLATE_COPPER_ORE,
+            Blocks.GOLD_ORE, Blocks.DEEPSLATE_GOLD_ORE,
+            Blocks.REDSTONE_ORE, Blocks.DEEPSLATE_REDSTONE_ORE,
+            Blocks.LAPIS_ORE, Blocks.DEEPSLATE_LAPIS_ORE,
+            Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE,
+            Blocks.EMERALD_ORE, Blocks.DEEPSLATE_EMERALD_ORE,
+            Blocks.NETHER_QUARTZ_ORE, Blocks.NETHER_GOLD_ORE,
+            Blocks.ANCIENT_DEBRIS);
+
+    private static boolean isOre(BlockState state) {
+        return ORES.contains(state.getBlock());
+    }
+
     /** 三种半径：岩浆 1、火 2、其余 6 */
     private static final int[] RADII = {1, 2, 6};
     private static final double[] FALLOFF = new double[RADII.length];
@@ -71,8 +91,8 @@ public final class BlockElementInfluence
         if (section == null || section.hasOnlyAir()) {
             return;
         }
-        // 快速排除：没有强源就没有工作
-        if (!section.maybeHas(BlockElementInfluence::isHotSource)) {
+        // 快速排除：没有强源、也没有矿石就没有工作
+        if (!section.maybeHas(state -> isHotSource(state) || isOre(state))) {
             return;
         }
 
@@ -80,7 +100,14 @@ public final class BlockElementInfluence
         for (int y = 0; y < 16; y++) {
             for (int z = 0; z < 16; z++) {
                 for (int x = 0; x < 16; x++) {
-                    int code = hotSourceCode(section.getBlockState(x, y, z));
+                    BlockState state = section.getBlockState(x, y, z);
+                    int code = hotSourceCode(state);
+
+                    // 矿石：只给自己那一格加土元素
+                    if (code == 0 && isOre(state)) {
+                        field.addBase(ElementTypes.Earth, ElementField.index(x, y, z), ORE_EARTH_BONUS);
+                        continue;
+                    }
                     if (code == 0) {
                         continue;
                     }
