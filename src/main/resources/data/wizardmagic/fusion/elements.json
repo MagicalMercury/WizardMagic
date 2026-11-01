@@ -1,0 +1,390 @@
+{
+  "format": "wizardmagic:element_fusion",
+  "version": 1,
+  "elements": [
+    {
+      "id": "earth",
+      "tier": 0
+    },
+    {
+      "id": "water",
+      "tier": 0
+    },
+    {
+      "id": "fire",
+      "tier": 0
+    },
+    {
+      "id": "air",
+      "tier": 0
+    },
+    {
+      "id": "light",
+      "tier": 1,
+      "recipe": [
+        "fire",
+        "air"
+      ]
+    },
+    {
+      "id": "dark",
+      "tier": 1,
+      "recipe": [
+        "earth",
+        "water"
+      ]
+    },
+    {
+      "id": "plant",
+      "tier": 1,
+      "recipe": [
+        "earth",
+        "air"
+      ]
+    },
+    {
+      "id": "metal",
+      "tier": 1,
+      "recipe": [
+        "earth",
+        "fire"
+      ]
+    },
+    {
+      "id": "motion",
+      "tier": 1,
+      "recipe": [
+        "water",
+        "fire"
+      ]
+    },
+    {
+      "id": "mist",
+      "tier": 1,
+      "recipe": [
+        "water",
+        "air"
+      ]
+    },
+    {
+      "id": "nature",
+      "tier": 2,
+      "recipe": [
+        "earth",
+        "plant"
+      ]
+    },
+    {
+      "id": "order",
+      "tier": 2,
+      "recipe": [
+        "light",
+        "metal"
+      ]
+    },
+    {
+      "id": "chaos",
+      "tier": 2,
+      "recipe": [
+        "fire",
+        "dark"
+      ]
+    },
+    {
+      "id": "void",
+      "tier": 2,
+      "recipe": [
+        "dark",
+        "light"
+      ]
+    },
+    {
+      "id": "thunder",
+      "tier": 2,
+      "recipe": [
+        "air",
+        "light"
+      ]
+    },
+    {
+      "id": "ice",
+      "tier": 2,
+      "recipe": [
+        "water",
+        "dark"
+      ]
+    },
+    {
+      "id": "rainbow",
+      "tier": 2,
+      "recipe": [
+        "water",
+        "light"
+      ]
+    },
+    {
+      "id": "poison",
+      "tier": 2,
+      "recipe": [
+        "plant",
+        "dark"
+      ]
+    },
+    {
+      "id": "crystal",
+      "tier": 2,
+      "recipe": [
+        "earth",
+        "light"
+      ]
+    },
+    {
+      "id": "salt",
+      "tier": 2,
+      "recipe": [
+        "water",
+        "metal"
+      ]
+    },
+    {
+      "id": "magma",
+      "tier": 2,
+      "recipe": [
+        "fire",
+        "metal"
+      ]
+    },
+    {
+      "id": "ash",
+      "tier": 2,
+      "recipe": [
+        "fire",
+        "plant"
+      ]
+    },
+    {
+      "id": "magnet",
+      "tier": 2,
+      "recipe": [
+        "metal",
+        "motion"
+      ]
+    },
+    {
+      "id": "gravity",
+      "tier": 2,
+      "recipe": [
+        "earth",
+        "motion"
+      ]
+    },
+    {
+      "id": "mirage",
+      "tier": 2,
+      "recipe": [
+        "air",
+        "mist"
+      ]
+    },
+    {
+      "id": "healing",
+      "tier": 2,
+      "recipe": [
+        "light",
+        "plant"
+      ]
+    },
+    {
+      "id": "fear",
+      "tier": 2,
+      "recipe": [
+        "dark",
+        "mist"
+      ]
+    },
+    {
+      "id": "pact",
+      "tier": 3,
+      "recipe": [
+        "order",
+        "dark"
+      ]
+    },
+    {
+      "id": "curse",
+      "tier": 3,
+      "recipe": [
+        "chaos",
+        "dark"
+      ]
+    },
+    {
+      "id": "blessing",
+      "tier": 3,
+      "recipe": [
+        "order",
+        "light"
+      ]
+    },
+    {
+      "id": "rune",
+      "tier": 3,
+      "recipe": [
+        "order",
+        "metal"
+      ]
+    },
+    {
+      "id": "ward",
+      "tier": 3,
+      "recipe": [
+        "order",
+        "earth"
+      ]
+    },
+    {
+      "id": "will",
+      "tier": 3,
+      "recipe": [
+        "motion",
+        "order"
+      ]
+    },
+    {
+      "id": "hope",
+      "tier": 3,
+      "recipe": [
+        "light",
+        "chaos"
+      ]
+    },
+    {
+      "id": "wrath",
+      "tier": 3,
+      "recipe": [
+        "fire",
+        "chaos"
+      ]
+    },
+    {
+      "id": "star",
+      "tier": 3,
+      "recipe": [
+        "fire",
+        "void"
+      ]
+    },
+    {
+      "id": "soul",
+      "tier": 3,
+      "recipe": [
+        "void",
+        "dark"
+      ]
+    },
+    {
+      "id": "dream",
+      "tier": 4,
+      "recipe": [
+        "soul",
+        "light"
+      ]
+    },
+    {
+      "id": "balance",
+      "tier": 4,
+      "recipe": [
+        "ward",
+        "nature"
+      ]
+    },
+    {
+      "id": "death",
+      "tier": 4,
+      "recipe": [
+        "soul",
+        "nature"
+      ]
+    },
+    {
+      "id": "fey",
+      "tier": 4,
+      "recipe": [
+        "blessing",
+        "nature"
+      ]
+    },
+    {
+      "id": "dragon",
+      "tier": 4,
+      "recipe": [
+        "star",
+        "fire"
+      ]
+    },
+    {
+      "id": "fate",
+      "tier": 5,
+      "recipe": [
+        "death",
+        "chaos"
+      ]
+    },
+    {
+      "id": "life",
+      "tier": 5,
+      "recipe": [
+        "fey",
+        "plant"
+      ]
+    },
+    {
+      "id": "sun",
+      "tier": 5,
+      "recipe": [
+        "dragon",
+        "light"
+      ]
+    },
+    {
+      "id": "moon",
+      "tier": 5,
+      "recipe": [
+        "dream",
+        "dark"
+      ]
+    },
+    {
+      "id": "guardian",
+      "tier": 5,
+      "recipe": [
+        "balance",
+        "order"
+      ]
+    },
+    {
+      "id": "aether",
+      "tier": 6,
+      "recipe": [
+        "fate",
+        "light"
+      ]
+    },
+    {
+      "id": "summon",
+      "tier": 6,
+      "recipe": [
+        "guardian",
+        "void"
+      ]
+    },
+    {
+      "id": "plague",
+      "tier": 6,
+      "recipe": [
+        "life",
+        "poison"
+      ]
+    }
+  ]
+}

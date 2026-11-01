@@ -2,6 +2,7 @@ package com.wizardmagic.elements.flow;
 
 import com.wizardmagic.elements.ElementField;
 import com.wizardmagic.elements.ElementTypes;
+import com.wizardmagic.elements.ManaBarrier;
 
 /**
  * 单 section 的扩散 + 源项松弛一步。
@@ -54,6 +55,11 @@ public final class ElementDiffusion
         final int betaQ = Math.max(0, (int) Math.round(beta * 256.0));
 
         for (int index = 0; index < ElementField.SIZE; index++) {
+            // 魔力屏障：完全阻断的格子不发出通量
+            int selfPerm = field.permeability(index);
+            if (selfPerm <= ManaBarrier.BLOCKED) {
+                continue;
+            }
             int word = current[index];
             if ((word & ALL_MASK) == 0) {
                 continue; // 四元素全 0，整格跳过
@@ -74,6 +80,11 @@ public final class ElementDiffusion
                     default -> { if (z == 0) continue; neighborIndex = index - 256; }
                 }
 
+                // 魔力屏障：完全阻断的邻居不接收通量
+                int neighborPerm = field.permeability(neighborIndex);
+                if (neighborPerm <= ManaBarrier.BLOCKED) {
+                    continue;
+                }
                 int neighborWord = current[neighborIndex];
 
                 for (int t = 0; t < COUNT; t++) {
@@ -90,6 +101,13 @@ public final class ElementDiffusion
 
                     // 提取比例后不足 1 点就不再扩散（等价于旧的 raw < 1.0）
                     int move = (diff * rateQ) >> 8;
+                    // 魔力屏障：按两端的通透度打折；127（完全通透）不做除法
+                    if (selfPerm < ManaBarrier.OPEN) {
+                        move = move * selfPerm / ManaBarrier.OPEN;
+                    }
+                    if (neighborPerm < ManaBarrier.OPEN) {
+                        move = move * neighborPerm / ManaBarrier.OPEN;
+                    }
                     if (move <= 0) {
                         continue;
                     }
@@ -111,6 +129,10 @@ public final class ElementDiffusion
 
         // 源项回流（把被抽低/堆高的格子缓慢拉回 base）
         for (int index = 0; index < ElementField.SIZE; index++) {
+            // 完全阻断的格子恒为 0，不参与回流
+            if (field.permeability(index) <= ManaBarrier.BLOCKED) {
+                continue;
+            }
             int word = current[index];
             int baseWord = base[index];
             if (word == baseWord) {

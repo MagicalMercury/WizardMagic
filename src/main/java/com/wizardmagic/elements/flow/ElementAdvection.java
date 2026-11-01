@@ -2,6 +2,7 @@ package com.wizardmagic.elements.flow;
 
 import com.wizardmagic.elements.ElementField;
 import com.wizardmagic.elements.ElementTypes;
+import com.wizardmagic.elements.ManaBarrier;
 import com.wizardmagic.elements.fluid.FluidField;
 import com.wizardmagic.elements.fluid.FluidManager;
 import net.minecraft.core.BlockPos;
@@ -51,6 +52,11 @@ public final class ElementAdvection {
         int oz = sectionOrigin.getZ();
 
         for (int idx = 0; idx < ElementField.SIZE; idx++) {
+            // 魔力屏障：完全阻断的格子平流结果不写回（保持 0，元素不能流过它）
+            int perm = field.permeability(idx);
+            if (perm <= ManaBarrier.BLOCKED) {
+                continue;
+            }
             int word = scratch[idx];
             if ((word & ALL_MASK) == 0) {
                 continue; // 全零格无需搬运
@@ -70,6 +76,10 @@ public final class ElementAdvection {
             double bz = z - vel[2] * dt;
 
             int advected = sampleWord(scratch, bx, by, bz);
+            // 魔力屏障：部分通透的格子，平流进来的量按比例打折
+            if (perm < ManaBarrier.OPEN) {
+                advected = scaleWord(advected, perm);
+            }
             // 源下限：元素不允许被吹到 base 以下（岩浆/火是持续输出的源，
             // 否则风一吹岩浆格的火就掉到阈值以下、光点直接消失）。
             int baseWord = base[idx];
@@ -90,6 +100,18 @@ public final class ElementAdvection {
         }
         com.wizardmagic.elements.flow.ElementBudget.record("adv", System.nanoTime() - t0);
         return changed;
+    }
+
+    /** 按通透度缩放一个打包 int 的四个元素（0..127）。 */
+    private static int scaleWord(int word, int perm) {
+        int out = 0;
+        for (int t = 0; t < ElementTypes.COUNT; t++) {
+            int shift = t * 8;
+            int v = (word >>> shift) & MASK;
+            int scaled = v * perm / ManaBarrier.OPEN;
+            out |= (scaled & MASK) << shift;
+        }
+        return out;
     }
 
     /** 三线性采样（4 元素分别插值后重新打包）。 */

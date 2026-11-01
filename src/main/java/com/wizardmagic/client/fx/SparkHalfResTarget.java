@@ -1,5 +1,7 @@
 package com.wizardmagic.client.fx;
 
+import com.mojang.blaze3d.platform.GlStateManager;
+import com.mojang.blaze3d.systems.RenderSystem;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL14;
@@ -138,14 +140,18 @@ public final class SparkHalfResTarget
 
         GL11.glDisable(GL11.GL_DEPTH_TEST);
         GL11.glDisable(GL11.GL_CULL_FACE);
-        GL11.glEnable(GL11.GL_BLEND);
-        GL11.glBlendFunc(GL11.GL_ONE, GL11.GL_ONE);
+        // 必须走 RenderSystem：直接 glBlendFunc 会让 RenderSystem 的缓存与实际状态不一致，
+        // 之后 MC 认为混合方程仍是默认值而跳过设置，加色混合就会泄漏到后续所有带混合的渲染
+        // （玩家着火的第一人称火焰覆盖、手部、GUI → 全部偏亮偏黄）。
+        RenderSystem.enableBlend();
+        RenderSystem.blendFunc(GlStateManager.SourceFactor.ONE, GlStateManager.DestFactor.ONE);
 
         GL30.glBindVertexArray(compositeVao);
         GL11.glDrawArrays(GL11.GL_TRIANGLE_STRIP, 0, 4);
         GL30.glBindVertexArray(0);
 
-        GL11.glDisable(GL11.GL_BLEND);
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableBlend();
         GL11.glEnable(GL11.GL_CULL_FACE);
         GL11.glEnable(GL11.GL_DEPTH_TEST);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);

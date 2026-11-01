@@ -1,0 +1,6 @@
+{
+  "parent": "wizardmagic:block/crucible/creative_crucible",
+  "textures": {
+    "0": "wizardmagic:block/creative_crucible_active"
+  }
+}

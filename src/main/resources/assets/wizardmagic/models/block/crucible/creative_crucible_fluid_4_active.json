@@ -1,0 +1,6 @@
+{
+  "parent": "wizardmagic:block/crucible/creative_crucible_fluid_4",
+  "textures": {
+    "0": "wizardmagic:block/creative_crucible_active"
+  }
+}

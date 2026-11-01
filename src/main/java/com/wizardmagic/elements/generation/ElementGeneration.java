@@ -2,6 +2,7 @@ package com.wizardmagic.elements.generation;
 
 import com.wizardmagic.elements.ElementField;
 import com.wizardmagic.elements.ElementFieldStorage;
+import com.wizardmagic.elements.ElementBarriers;
 import com.wizardmagic.elements.ElementTypes;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
@@ -107,6 +108,8 @@ public final class ElementGeneration
         rebuildBase(chunk, sectionIndex, field);
         // 生成：current 直接对齐 base，处于稳态
         field.resetToBase();
+        // 魔力拒绝方块：标记位图并把被占据格子的元素清零（内部不允许存在任何元素）
+        ElementBarriers.scan(chunk.getSection(sectionIndex), field);
         field.setGenerated(true);
         field.setDirty(false);
         return true;
@@ -136,6 +139,9 @@ public final class ElementGeneration
         // base 变了，current 需要重新向新 base 收敛
         field.setDirty(true);
         field.setLastStepTick(0L);
+        // 方块变化可能放置/破坏了魔力拒绝方块：重扫位图，并把被占据格子清零。
+        // 必须放在恢复 current 之后，否则 zeroCell 的结果会被上面的 setCurrent 覆盖。
+        ElementBarriers.scan(chunk.getSection(sectionIndex), field);
     }
 
     /** 只写 base：噪声 + 群系 + 高度 + 卷积（粗格合并）→ 一次插值 → 强源逐格 */

@@ -41,6 +41,13 @@ public final class ElementField implements INBTSerializable<CompoundTag>
     /** 扩散用的复用缓冲，避免每 tick 分配 16KB */
     private final int[] scratch = new int[SIZE];
 
+    /** 魔力屏障位图：完全阻断（通透度 0）的格子，1 位一格 */
+    private final long[] blocked = new long[SIZE >> 6];
+    /** 部分通透格子的系数（0..127），懒分配；null 表示没有部分通透的格子 */
+    private byte[] permeability;
+    /** 本 section 是否含有任何魔力屏障（没有时所有屏障判定都能直接短路） */
+    private boolean hasBarrier;
+
     /** 是否已经生成过（区分「未生成」与「全 0」） */
     private boolean generated;
     /** 是否与 base 有偏差（有扰动才需要扩散） */
@@ -181,6 +188,69 @@ public final class ElementField implements INBTSerializable<CompoundTag>
         for (int i = 0; i < SIZE; i++) {
             current[i] = (current[i] & clearMask) | packed;
         }
+    }
+
+    // ---------------------------------------------------- 魔力屏障标记
+
+    public boolean hasBarrier() {
+        return hasBarrier;
+    }
+
+    /** 该格是否被完全阻断（通透度 0） */
+    public boolean isBlocked(int index) {
+        return hasBarrier && (blocked[index >> 6] & (1L << (index & 63))) != 0;
+    }
+
+    /**
+     * 该格的魔力通透度，0..127（127 = 普通方块）。
+     * 无屏障的 section 直接返回 {@link ManaBarrier#OPEN}，热路径零额外成本。
+     */
+    public int permeability(int index) {
+        if (!hasBarrier) {
+            return ManaBarrier.OPEN;
+        }
+        if ((blocked[index >> 6] & (1L << (index & 63))) != 0) {
+            return ManaBarrier.BLOCKED;
+        }
+        return permeability == null ? ManaBarrier.OPEN : (permeability[index] & 0xFF);
+    }
+
+    /**
+     * 设置一格的通透度。
+     * <ul>
+     *   <li>0：记为完全阻断，并把该格元素清零；</li>
+     *   <li>1..126：记入系数数组（懒分配），元素可在内部存在；</li>
+     *   <li>127：完全通透，不记录。</li>
+     * </ul>
+     */
+    public void setPermeability(int index, int perm) {
+        if (perm >= ManaBarrier.OPEN) {
+            return;
+        }
+        hasBarrier = true;
+        if (perm <= ManaBarrier.BLOCKED) {
+            blocked[index >> 6] |= 1L << (index & 63);
+            zeroCell(index);
+            return;
+        }
+        if (permeability == null) {
+            permeability = new byte[SIZE];
+            Arrays.fill(permeability, (byte) ManaBarrier.OPEN);
+        }
+        permeability[index] = (byte) perm;
+    }
+
+    /** 清空所有屏障标记（重新扫描方块前调用） */
+    public void clearBarriers() {
+        Arrays.fill(blocked, 0L);
+        permeability = null;
+        hasBarrier = false;
+    }
+
+    /** 把一格的四元素当前值与基础值全部清零（完全阻断时用） */
+    public void zeroCell(int index) {
+        current[index] = 0;
+        base[index] = 0;
     }
 
     // ------------------------------------------------------- 扩散用数组访问
