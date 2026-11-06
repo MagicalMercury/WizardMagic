@@ -1,58 +1,20 @@
 {
-  "variants": {
-    "level=0,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible"
+  "multipart": [
+    {
+      "when": {
+        "active": "false"
+      },
+      "apply": {
+        "model": "wizardmagic:block/crucible/creative_crucible"
+      }
     },
-    "level=0,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_active"
-    },
-    "level=1,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_1"
-    },
-    "level=1,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_1_active"
-    },
-    "level=2,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_2"
-    },
-    "level=2,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_2_active"
-    },
-    "level=3,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_3"
-    },
-    "level=3,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_3_active"
-    },
-    "level=4,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_4"
-    },
-    "level=4,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_4_active"
-    },
-    "level=5,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_5"
-    },
-    "level=5,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_5_active"
-    },
-    "level=6,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_6"
-    },
-    "level=6,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_6_active"
-    },
-    "level=7,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_7"
-    },
-    "level=7,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_7_active"
-    },
-    "level=8,active=false": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_8"
-    },
-    "level=8,active=true": {
-      "model": "wizardmagic:block/crucible/creative_crucible_fluid_8_active"
+    {
+      "when": {
+        "active": "true"
+      },
+      "apply": {
+        "model": "wizardmagic:block/crucible/creative_crucible_active"
+      }
     }
-  }
+  ]
 }

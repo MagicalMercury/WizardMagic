@@ -28,8 +28,21 @@ Minecraft **1.20.1** 魔法主题模组，基于 **Forge 47.1.3**（通过 NeoFo
 
 ```
 src/main/java/com/wizardmagic/
-├── WizardMagic.java        # @Mod 主类，MODID / 注册表 / 事件总线
-└── Config.java             # ForgeConfigSpec 配置骨架
+├── WizardMagic.java        # @Mod 主类，MODID / 事件总线
+├── Config.java             # ForgeConfigSpec 配置骨架
+├── api/                    # 对外契约
+│   ├── elements/           # 元素场读写入口、元素枚举
+│   └── crucible/           # 坩埚状态与渲染契约（纯 Java）
+├── core/                   # 引擎核心
+│   ├── elements/           # 元素场、扩散/平流、流体求解、场生成、事件接线
+│   └── fusion/             # 要素合成数据模型
+└── common/                 # 平台与内容层
+    ├── blocks/             # 方块与方块实体
+    ├── client/             # 客户端渲染（粒子管线、坩埚着色）
+    ├── command/            # 调试命令
+    ├── fx/                 # 粒子效果请求
+    ├── network/            # 网络通道与数据包
+    └── registry/           # 注册表入口
 src/main/resources/assets/wizardmagic/lang/en_us.json   # 语言文件
 src/main/resources/META-INF/mods.toml                   # 元数据（构建时展开 ${}）
 src/main/resources/pack.mcmeta

@@ -1,7 +1,9 @@
 package com.wizardmagic;
 
 import com.mojang.logging.LogUtils;
-import com.wizardmagic.registry.ModRegistration;
+import com.wizardmagic.common.blocks.research_desk.ResearchDeskRenderer;
+import com.wizardmagic.common.blocks.research_desk.ResearchDeskScreen;
+import com.wizardmagic.common.registry.ModRegistration;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
@@ -44,7 +46,7 @@ public class WizardMagic
 
     private void commonSetup(final FMLCommonSetupEvent event)
     {
-        event.enqueueWork(com.wizardmagic.network.ModNetwork::register);
+        event.enqueueWork(com.wizardmagic.common.network.ModNetwork::register);
         LOGGER.info("Wizard Magic common setup");
     }
 
@@ -63,8 +65,23 @@ public class WizardMagic
         @SubscribeEvent
         public static void onClientSetup(FMLClientSetupEvent event)
         {
+            event.enqueueWork(() -> net.minecraft.client.gui.screens.MenuScreens.register(
+                    com.wizardmagic.common.registry.ModMenuTypes.RESEARCH_DESK.get(),
+                    ResearchDeskScreen::new));
             LOGGER.info("Wizard Magic client setup");
             LOGGER.info("MINECRAFT NAME >> {}", Minecraft.getInstance().getUser().getName());
+        }
+
+        @SubscribeEvent
+        public static void onRegisterRenderers(net.minecraftforge.client.event.EntityRenderersEvent.RegisterRenderers event)
+        {
+            event.registerBlockEntityRenderer(
+                    com.wizardmagic.common.registry.ModBlockEntities.RESEARCH_DESK.get(),
+                    ResearchDeskRenderer::new);
+            // 通用坩埚渲染器：所有继承 CrucibleBlockEntity 的坩埚共用同一实现
+            event.registerBlockEntityRenderer(
+                    com.wizardmagic.common.registry.ModBlockEntities.CREATIVE_CRUCIBLE.get(),
+                    com.wizardmagic.common.client.CrucibleRenderer::new);
         }
     }
 }
