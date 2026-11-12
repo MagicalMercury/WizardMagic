@@ -1,5 +1,7 @@
 package com.wizardmagic.common.client.fx;
 
+import com.wizardmagic.common.client.shader.CameraBasis;
+
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Camera;
@@ -59,6 +61,10 @@ public final class SparkBatch
     private int sortCount;
     /** 本 tick 实际写入实例表的数量（≤ MAX_DRAW） */
     private int instanceCount;
+    /** 法术粒子实例源（客户端镜像）；null 表示没有法术层 */
+    private SpellInstanceSource spellSource;
+    /** 上一帧写入的法术实例数 */
+    private int spellCount;
 
     private SparkBatch() {
         for (int i = 0; i < CAPACITY; i++) {
@@ -185,6 +191,28 @@ public final class SparkBatch
         instanceDirty = true;
     }
 
+    /** 注册/注销法术实例源；注册后法术粒子优先占用 MAX_DRAW 名额 */
+    public void setSpellSource(SpellInstanceSource source) {
+        this.spellSource = source;
+        this.spellCount = 0;
+        instanceDirty = true;
+    }
+
+    /** 立即重建实例表（法术云每 tick、生成、销毁后调用） */
+    public void rebuildNow() {
+        rebuildInstances();
+    }
+
+    /** 上一帧写入的法术实例数（调试用） */
+    public int spellInstanceCount() {
+        return spellCount;
+    }
+
+    /** 与 shader 的 uTime 同一时间基准（tick 单位），法术粒子用它算 birth/life */
+    public static float nowTicks() {
+        return now();
+    }
+
     /** 每 tick 推进位置与生命周期，并重建实例表 */
     public void tick() {
         boolean changed = false;
@@ -236,9 +264,28 @@ public final class SparkBatch
     }
 
     private void rebuildInstances() {
+        int limit = MAX_DRAW;
+        int written = 0;
+
+        // 0) 法术粒子最先写入：它们优先占用 MAX_DRAW 名额
+        if (spellSource != null) {
+            int n = spellSource.fill(instanceData, limit);
+            if (n < 0) {
+                n = 0;
+            } else if (n > limit) {
+                n = limit;
+            }
+            spellCount = n;
+            written = n;
+        } else {
+            spellCount = 0;
+        }
+        int idx = written * SparkInstancedRenderer.FLOATS_PER_INSTANCE;
+
         int total = burstCount + persistCount;
-        if (total == 0) {
+        if (total == 0 || written >= limit) {
             sortCount = 0;
+            instanceCount = written;
             instanceDirty = true;
             return;
         }
@@ -249,11 +296,7 @@ public final class SparkBatch
             sortByDistance(total);
         }
 
-        int idx = 0;
-        int written = 0;
-        int limit = MAX_DRAW;
-
-        // 1) 法术特效（burst）优先，按距离从近到远填满名额
+        // 1) burst：按距离从近到远填满剩余名额
         for (int k = 0; k < sortCount && written < limit; k++) {
             int slot = sortOrder[k];
             if (slot >= BURST_CAPACITY) {
@@ -354,36 +397,10 @@ public final class SparkBatch
         pool[BURST_CAPACITY + index] = last;
     }
 
-    /** 相机基向量（世界空间），每帧计算一次 */
-    public record Basis(float rX, float rY, float rZ,
-                        float uX, float uY, float uZ,
-                        float fX, float fY, float fZ)
-    {
-        public static Basis of(Camera camera) {
-            Vector3f left = camera.getLeftVector();
-            Vector3f up = camera.getUpVector();
-            Vector3f look = camera.getLookVector();
-            return new Basis(-left.x(), -left.y(), -left.z(),
-                    up.x(), up.y(), up.z(),
-                    look.x(), look.y(), look.z());
-        }
-
-        /**
-         * GLSL mat3 是列主序，R 的行是 (r, u, -f)：
-         * 列 0 = (r.x, u.x, -f.x) ...
-         */
-        public float[] toColumnMajor() {
-            return new float[]{
-                    rX, uX, -fX,
-                    rY, uY, -fY,
-                    rZ, uZ, -fZ
-            };
-        }
-    }
 
     /** 渲染所有光点（RenderLevelStageEvent.AFTER_WEATHER） */
     public void render(Camera camera, float partialTick) {
-        if (burstCount + persistCount == 0) {
+        if (burstCount + persistCount == 0 && spellCount == 0) {
             return;
         }
         if (!SparkGlProgram.ensure()) {
@@ -404,7 +421,7 @@ public final class SparkBatch
             SparkInstancedRenderer.upload(instanceData, instanceCount);
             instanceDirty = false;
         }
-        Basis basis = Basis.of(camera);
+        CameraBasis basis = CameraBasis.of(camera);
         float[] viewRotation = basis.toColumnMajor();
         float time = now() + partialTick;
 
@@ -471,9 +488,23 @@ public final class SparkBatch
             // 分流尺子固定用半分辨率 screenScale：小趟的 screenScale（全分辨率）是它的一半
             float refScale = tinyPass == 1 ? screenScale * 0.5f : screenScale;
 
-            SparkInstancedRenderer.draw(instanceCount, RenderSystem.getProjectionMatrix(), viewRotation,
-                    (float) cam.x, (float) cam.y, (float) cam.z, time, partialTick,
-                    maxDist, fadeStart, screenScale, targetW, targetH, refScale, tinyPass);
+            var projection = RenderSystem.getProjectionMatrix();
+            int sparkCount = instanceCount - spellCount;
+            // 法术粒子：独立区间 + 更大的裁距（半可见要画到 192 格）。
+            // shader 侧不做距离淡出（fadeStart≈maxDist），淡出由 CPU 端的半可见 alpha 完成。
+            if (spellCount > 0) {
+                float spellRange = (float) com.wizardmagic.core.spell.SpellConstants.RENDER_HARD_RANGE;
+                SparkInstancedRenderer.drawRange(0, spellCount, projection, viewRotation,
+                        (float) cam.x, (float) cam.y, (float) cam.z, time, partialTick,
+                        spellRange, spellRange * 0.995f, screenScale, targetW, targetH, refScale, tinyPass,
+                        1.0F);
+            }
+            if (sparkCount > 0) {
+                SparkInstancedRenderer.drawRange(spellCount, sparkCount, projection, viewRotation,
+                        (float) cam.x, (float) cam.y, (float) cam.z, time, partialTick,
+                        maxDist, fadeStart, screenScale, targetW, targetH, refScale, tinyPass,
+                        0.0F);
+            }
         } finally {
             RenderSystem.depthMask(true);
             RenderSystem.enableCull();

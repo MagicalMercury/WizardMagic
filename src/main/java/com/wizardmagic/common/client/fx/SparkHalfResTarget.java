@@ -1,5 +1,7 @@
 package com.wizardmagic.common.client.fx;
 
+import com.wizardmagic.common.client.shader.GlProgram;
+
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import org.lwjgl.opengl.GL11;
@@ -39,7 +41,13 @@ public final class SparkHalfResTarget
     private static int height;
     private static boolean broken;
 
-    // 合成管线（自建）
+    // 合成管线（自建）：program 编译交给 GlProgram，这里只管 VAO/VBO 与 uniform 位置
+    private static final GlProgram COMPOSITE = new GlProgram(
+            "spark_composite",
+            "shaders/core/spark_composite.vsh",
+            "shaders/core/spark_composite.fsh")
+            .attribute(0, "aPos");
+
     private static int compositeProgram = -1;
     private static int compositeVao = -1;
     private static int compositeVbo = -1;
@@ -163,29 +171,13 @@ public final class SparkHalfResTarget
             return true;
         }
         try {
-            String vertexSource = ShaderSource.load("shaders/core/spark_composite.vsh");
-            String fragmentSource = ShaderSource.load("shaders/core/spark_composite.fsh");
-            if (vertexSource == null || fragmentSource == null) {
+            if (!COMPOSITE.ensure()) {
                 broken = true;
                 return false;
             }
-            int vs = compile(GL20.GL_VERTEX_SHADER, vertexSource);
-            int fs = compile(GL20.GL_FRAGMENT_SHADER, fragmentSource);
-            int program = GL20.glCreateProgram();
-            GL20.glAttachShader(program, vs);
-            GL20.glAttachShader(program, fs);
-            GL20.glBindAttribLocation(program, 0, "aPos");
-            GL20.glLinkProgram(program);
-            if (GL20.glGetProgrami(program, GL20.GL_LINK_STATUS) == GL11.GL_FALSE) {
-                LOGGER.error("composite link failed: {}", GL20.glGetProgramInfoLog(program));
-                GL20.glDeleteProgram(program);
-                broken = true;
-                return false;
-            }
-            GL20.glDeleteShader(vs);
-            GL20.glDeleteShader(fs);
+            int program = COMPOSITE.handle();
             compositeProgram = program;
-            compositeTexLoc = GL20.glGetUniformLocation(program, "uTex");
+            compositeTexLoc = COMPOSITE.uniform("uTex");
 
             // 0..1 的屏幕坐标，TRIANGLE_STRIP：(0,0) (1,0) (0,1) (1,1)
             float[] vertices = {
@@ -213,17 +205,6 @@ public final class SparkHalfResTarget
             broken = true;
             return false;
         }
-    }
-
-    private static int compile(int type, String source) {
-        int shader = GL20.glCreateShader(type);
-        GL20.glShaderSource(shader, source);
-        GL20.glCompileShader(shader);
-        if (GL20.glGetShaderi(shader, GL20.GL_COMPILE_STATUS) == GL11.GL_FALSE) {
-            throw new IllegalStateException("composite shader compile failed: "
-                    + GL20.glGetShaderInfoLog(shader));
-        }
-        return shader;
     }
 
     public static void destroy() {

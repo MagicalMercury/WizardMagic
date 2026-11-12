@@ -162,6 +162,23 @@ public final class SparkInstancedRenderer
                             float camX, float camY, float camZ, float time, float partial,
                             float maxDist, float fadeStart, float screenScale,
                             float targetW, float targetH, float refScale, int tinyPass) {
+        drawRange(0, count, projection, viewRotation, camX, camY, camZ, time, partial,
+                maxDist, fadeStart, screenScale, targetW, targetH, refScale, tinyPass, 0.0F);
+    }
+
+    /**
+     * 画实例区间 {@code [firstInstance, firstInstance + count)}。
+     *
+     * <p>用于把「法术粒子」和「光点」拆成两次 draw：两段可以有各自的 {@code uMaxDist}
+     * （法术要画到 192 格做半可见，光点仍是 64 格）与生命期淡出曲线
+     * （{@code lifeFade}：0 = 火花 (1-t)²，1 = 法术平台 + 尾段淡出）。
+     * GL 3.2 没有 baseInstance，所以这里改绑实例属性指针到区间起点。</p>
+     */
+    public static void drawRange(int firstInstance, int count, Matrix4f projection, float[] viewRotation,
+                                 float camX, float camY, float camZ, float time, float partial,
+                                 float maxDist, float fadeStart, float screenScale,
+                                 float targetW, float targetH, float refScale, int tinyPass,
+                                 float lifeFade) {
         if (vao == -1 || count <= 0) {
             return;
         }
@@ -180,10 +197,22 @@ public final class SparkInstancedRenderer
         GL20.glUniform2f(SparkGlProgram.uHalfRes(), targetW, targetH);
         GL20.glUniform1f(SparkGlProgram.uRefScale(), refScale);
         GL20.glUniform1f(SparkGlProgram.uTinyPass(), tinyPass);
+        GL20.glUniform1f(SparkGlProgram.uLifeFade(), lifeFade);
 
         GlStateManager._glBindVertexArray(vao);
+        GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, instVbo);
+        bindInstanceAttributes((long) firstInstance * BYTES_PER_INSTANCE);
         GL31C.glDrawArraysInstanced(GL11.GL_TRIANGLE_STRIP, 0, 4, count);
         GlStateManager._glBindVertexArray(0);
+        GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);
         GL20.glUseProgram(0);
+    }
+
+    /** 把实例属性指针指到区间起点（divisor 已在 ensure 里设好，不随指针变化） */
+    private static void bindInstanceAttributes(long baseBytes) {
+        GL20.glVertexAttribPointer(2, 3, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, baseBytes);
+        GL20.glVertexAttribPointer(3, 3, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, baseBytes + 12L);
+        GL20.glVertexAttribPointer(4, 4, GL11.GL_UNSIGNED_BYTE, true, BYTES_PER_INSTANCE, baseBytes + 24L);
+        GL20.glVertexAttribPointer(5, 4, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, baseBytes + 28L);
     }
 }

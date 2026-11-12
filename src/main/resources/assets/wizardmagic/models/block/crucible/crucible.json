@@ -5,7 +5,8 @@
     128
   ],
   "textures": {
-    "0": "wizardmagic:block/crucible_atlas"
+    "0": "wizardmagic:block/crucible_atlas",
+    "particle": "wizardmagic:block/crucible_particle"
   },
   "elements": [
     {

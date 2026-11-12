@@ -1,4 +1,4 @@
-package com.wizardmagic.common.client.fx;
+package com.wizardmagic.common.client.shader;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.resources.ResourceLocation;

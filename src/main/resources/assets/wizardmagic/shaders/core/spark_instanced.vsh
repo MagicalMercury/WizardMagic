@@ -18,6 +18,7 @@ uniform float uScreenScale;  // screenHeight / (2*tan(fov/2))，用于像素尺�
 uniform vec2 uHalfRes;       // 渲染目标像素尺寸（半分辨率 FBO，全屏回退时为屏幕尺寸）
 uniform float uRefScale;     // 分流参考尺子：半分辨率 screenScale（两趟共用，见 ph）
 uniform float uTinyPass;     // -1=不分趟（全屏回退），0=半分辨率大粒子趟，1=全分辨率小粒子趟
+uniform float uLifeFade;     // 0=火花 (1-t)^2；1=法术：平台到 72% 再快速淡出（配合消散爆开）
 
 out vec4 vColor;
 out vec2 vUv;
@@ -25,7 +26,10 @@ out float vPhase;
 
 void main() {
     float t = clamp((uTime - iMeta.y) / max(iMeta.z, 1.0), 0.0, 1.0);
-    float alpha = (1.0 - t) * (1.0 - t);
+    // 法术粒子：平台期保持亮度，最后 18% 快速淡出（与物理上的"释放约束爆开"同步）
+    float alpha = uLifeFade > 0.5
+            ? (1.0 - smoothstep(0.82, 1.0, t))
+            : (1.0 - t) * (1.0 - t);
     float size = iMeta.x * (1.0 - 0.55 * t);
 
     vColor = vec4(iColor.rgb, iColor.a * alpha);
