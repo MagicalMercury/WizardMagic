@@ -55,6 +55,35 @@ public final class SpellCloudClient implements SpellInstanceSource
     /** 慢步日志节流（毫秒时间戳） */
     private long lastSlowLog;
 
+    /**
+     * 诊断开关：只有 {@code -Dwizardmagic.script.debug=1} 才打。
+     *
+     * <p>正常游玩不该每秒刷一行相位/时钟诊断；调「画面抽一下」这类问题时再打开，
+     * 一次就能看出是时钟被撬、还是步进/相位错格。</p>
+     */
+    private static final boolean DIAG = System.getProperty("wizardmagic.script.debug") != null;
+
+    /**
+     * 诊断（不参与任何逻辑）：客户端时钟与渲染相位。
+     *
+     * <p>每秒汇总一行：这一秒里客户端 tick 数、步进数、相邻步进的间隔、以及 {@code fill}
+     * 实际采样到的相位变化序列。用来判定「步进/相位是否真的每 tick 前进一格」。</p>
+     */
+    private long diagNanos;
+    private int diagTicks;
+    private int diagSteps;
+    private long diagLastStepNanos;
+    private double diagGapMin = Double.MAX_VALUE;
+    private double diagGapMax;
+    private int diagLastPhase = -1;
+    private final StringBuilder diagPhases = new StringBuilder();
+
+    /** 诊断：上一次看到的 gameTime 与跳变统计（只记日志，不参与逻辑） */
+    private long lastGameTime = Long.MIN_VALUE;
+    private long lastClockLog;
+    private int clockJumps;
+    private long clockDrift;
+
     private SpellCloudClient()
     {
     }
@@ -332,13 +361,51 @@ public final class SpellCloudClient implements SpellInstanceSource
             clouds.clear();
             tombstones.clear();
             lastLevel = level;
+            lastGameTime = Long.MIN_VALUE;
+        }
+
+        // 诊断（默认关）：客户端 gameTime 是否连续。正常情况下每个 tick 只 +1；
+        // 出现其它增量说明时间包把整值覆盖过来了——那时步进/插值的奇偶相位会跟着抖。
+        if (DIAG)
+        {
+            long gameTime = level.getGameTime();
+            if (lastGameTime != Long.MIN_VALUE && gameTime - lastGameTime != 1L)
+            {
+                long delta = gameTime - lastGameTime;
+                clockJumps++;
+                clockDrift += delta - 1L;
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - lastClockLog > 500L)
+                {
+                    lastClockLog = nowMs;
+                    LOGGER.info("[wizardmagic] client clock delta={} gt={} jumps={} drift={}",
+                            delta, gameTime, clockJumps, clockDrift);
+                }
+            }
+            lastGameTime = gameTime;
         }
 
         boolean changed = false;
         // 步进与插值必须用同一个时钟来源：都用 level.getGameTime()，否则时间包跳变时
         // 两者相位错开，画面会在两个插值区间之间来回跳（看起来就是抖动）。
+        if (DIAG)
+        {
+            diagTicks++;
+        }
         if (level.getGameTime() % SpellConstants.STEP_TICKS == 0)
         {
+            if (DIAG)
+            {
+                diagSteps++;
+                long stepNanos = System.nanoTime();
+                if (diagLastStepNanos != 0L)
+                {
+                    double gap = (stepNanos - diagLastStepNanos) / 1.0E6;
+                    diagGapMin = Math.min(diagGapMin, gap);
+                    diagGapMax = Math.max(diagGapMax, gap);
+                }
+                diagLastStepNanos = stepNanos;
+            }
             for (ClientCloud c : clouds.values())
             {
                 c.copyPrev();
@@ -384,6 +451,30 @@ public final class SpellCloudClient implements SpellInstanceSource
         {
             SparkBatch.get().rebuildNow();
         }
+
+        // 每秒汇总一次时钟/相位诊断（仅调试开关打开时）
+        if (DIAG)
+        {
+            long diagNow = System.nanoTime();
+            if (diagNanos == 0L)
+            {
+                diagNanos = diagNow;
+            }
+            else if (diagNow - diagNanos >= 1_000_000_000L)
+            {
+                LOGGER.info("[wizardmagic] render diag: ticks={} steps={} gap={}..{}ms phase={}",
+                        diagTicks, diagSteps,
+                        diagGapMin == Double.MAX_VALUE ? "-" : String.format(Locale.ROOT, "%.1f", diagGapMin),
+                        diagGapMax == 0.0 ? "-" : String.format(Locale.ROOT, "%.1f", diagGapMax),
+                        diagPhases.length() == 0 ? "-" : diagPhases.toString());
+                diagNanos = diagNow;
+                diagTicks = 0;
+                diagSteps = 0;
+                diagGapMin = Double.MAX_VALUE;
+                diagGapMax = 0.0;
+                diagPhases.setLength(0);
+            }
+        }
     }
 
     // ------------------------------------------------------------- 实例填充
@@ -403,6 +494,14 @@ public final class SpellCloudClient implements SpellInstanceSource
         }
         // 物理每 2 tick 一步：本 tick 在两步之间的位置系数（与步进用同一个 clock 来源）
         int m = (int) (level.getGameTime() % SpellConstants.STEP_TICKS);
+        if (DIAG && m != diagLastPhase)
+        {
+            diagLastPhase = m;
+            if (diagPhases.length() < 80)
+            {
+                diagPhases.append((char) ('0' + m));
+            }
+        }
         double f0 = m * 0.5;
         double f1 = f0 + 0.5;
 

@@ -484,7 +484,13 @@ public final class SpellCloudClient implements SpellInstanceSource {
 - 缓存不省帧时间：解析 16 µs + 代码生成 14 µs = **30 µs/脚本**，而一次 3000 粒步进 1300 µs（差 41 倍）。它的价值是"法术落进存档、看得见、能核对"与玩家法术存放，不是帧时间
 - 顺带修掉的潜在 bug：快速路径原先不考虑 `cast` 变量的类型，脚本被多朵云复用时可能沿用按另一套变量推断的代码；现在按变量签名核对，不一致就重编
 - 接线：开服 `warmUp`（全编 + 写缓存 + 一行摘要）；`/spell debug scripts` 显示 `[内置]/[存档]`、快速路径或解释器、缓存字节；`/spell debug cache` 重建缓存；客户端按源码字符串缓存编译结果（上限 64）
-- 同步修正：生成包携带 `spawnGameTime`，客户端按 `expectedAge()` 快进补齐服务端在生成 tick 已走的那一步；暂停时不同步。**插值相位必须与渲染的 `partialTick` 同源**——曾改成"本地步进时钟"，结果相对 level tick 漂移一 tick，画面每步先冲过去再退回来（10 Hz 来回抽动、FPS 正常），已回退为 `level.getGameTime() % STEP_TICKS`。若以后要修漏步，正确写法是记录上一次步进的 `gameTime` 再 `clamp(gameTime - lastStepGameTime, 0, 1)`，不是另起一个计数器。
+- 客户端步进/插值时钟（**结论：仍用 `level.getGameTime()` 的奇偶，步进与相位共用**）：踩过两次坑，第三次才算有数据
+  - 第一次错：`stepClock` 只在 `gameTime` 变化时 +1，而门是每个 client tick 都判的 → 门会连开，双步 + 相位滑（画面每步先冲过去再退回来）
+  - 第二次尝试：换成纯本地单调计数器（每客户端 tick 无条件 +1）。实测体感**更差**，已回退——原因至今没有确证，不要再盲试
+  - 回退后实测是好的：单云时 `render diag` 的 `phase` 全程 `010101…`、步间隔 92–104 ms、火焰风暴 **120 步对 120 步 `compare=OK`**（零丢步）
+  - 曾经看到过"每秒抽一下"：那次是 8 朵云 / 3 种脚本同时在跑，客户端 120 步丢 5 步、lag 随寿命增长。同一份代码单云时不复现，怀疑与多脚本 JIT 反复编译/去优化有关（此前实测多脚本会把步进从 1.34 抖到 2.1 ms），**未定论**
+  - 诊断（默认关，`-Dwizardmagic.script.debug=1` 才打）：客户端 `gameTime` 增量 ≠ 1 时打 `client clock delta=… drift=…`；每秒一行 `render diag: ticks= steps= gap=…ms phase=…`。复现"抽动"时先看这两个：`phase` 非 `0101` 或 `gap` 出现 50/150 = 相位/步进被撬；两者都规整 = 去查渲染或 JIT 那条线
+- 同步修正：生成包携带 `spawnGameTime`，客户端按 `expectedAge()` 快进补齐服务端在生成 tick 已走的那一步；暂停时不同步
 - 未做：tick 内 `emit`（子粒子）、事件（命中/到期）、用户函数、玩家脚本目录、符文板 UI
 
 ---
