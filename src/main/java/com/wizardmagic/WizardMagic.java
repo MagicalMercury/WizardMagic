@@ -31,7 +31,7 @@ public class WizardMagic
     {
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
 
-        // 所有注册表（方块、物品、创造标签页、要素）统一在 registry 包里管理
+        // 所有注册表（方块、物品、创造标签页、元素）统一在 registry 包里管理
         ModRegistration.register(modEventBus);
 
         // Register the commonSetup method for modloading
@@ -56,6 +56,16 @@ public class WizardMagic
     {
         // Do something when the server starts
         LOGGER.info("Wizard Magic: server starting");
+        // 存档里的法术目录 + 编译缓存：启动时全编一遍，缓存没命中就重编并写回
+        try
+        {
+            com.wizardmagic.common.spell.SpellScripts.warmUp(event.getServer());
+        }
+        catch (RuntimeException e)
+        {
+            // 法术目录坏了不能连累开服
+            LOGGER.warn("Wizard Magic: 法术缓存预热失败", e);
+        }
     }
 
     // You can use EventBusSubscriber to automatically register all static methods in the class annotated with @SubscribeEvent

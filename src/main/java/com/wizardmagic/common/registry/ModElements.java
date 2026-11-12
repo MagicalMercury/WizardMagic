@@ -19,14 +19,14 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 要素注册表。
+ * 元素注册表。
  *
  * <p>{@code wizardmagic:element} 是一个<b>自定义注册表</b>（不是物品、不是方块），
  * 由 Forge 的 {@link DeferredRegister#create(ResourceKey, String)} 自动通过
- * {@code NewRegistryEvent} 创建。其它模组可以按 id 查表，也可以往同一个注册表里加自己的要素。</p>
+ * {@code NewRegistryEvent} 创建。其它模组可以按 id 查表，也可以往同一个注册表里加自己的元素。</p>
  *
  * <p>数据来源是 {@code data/wizardmagic/fusion/elements.json}：注册时逐个登记，
- * 加一个要素只需要改 JSON，不需要写 Java 代码。</p>
+ * 加一个元素只需要改 JSON，不需要写 Java 代码。</p>
  */
 public final class ModElements {
 
@@ -38,7 +38,7 @@ public final class ModElements {
     public static final DeferredRegister<Element> ELEMENTS =
             DeferredRegister.create(REGISTRY_KEY, WizardMagic.MODID);
 
-    /** 要素 id（path）→ 注册对象，按元素表顺序。 */
+    /** 元素 id（path）→ 注册对象，按元素表顺序。 */
     private static final Map<String, RegistryObject<Element>> BY_ID = new LinkedHashMap<>();
 
     static {

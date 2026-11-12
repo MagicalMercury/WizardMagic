@@ -1,0 +1,33 @@
+# spell v1 name="冰霜新星"
+# 地面圆环 + 向外推 + 强阻尼：靠"先给速度、再让摩擦吃掉"做出扩散后停住的感觉。
+# 这条脚本没有任何龙卷词汇（没有 hold、没有轴心），证明同一个引擎能跑别的法术。
+
+on cast {
+    emit {
+        element: ice
+        count: 2048
+        life: 4.5
+        shape: ring { radius: 0.7, thickness: 0.5 }
+        at: here()
+    }
+}
+
+on tick(dt) {
+    let t = time / life
+    let push = 11.0 * (1 - smoothstep(0, 0.45, t))
+    let g = gravity(ice)
+    let vol = volatility(ice)
+
+    for p in particles {
+        let rd = radial(p.axis, p.pos)
+        p.v = p.v + rd * (push * dt)
+        p.v = p.v * max(0, 1 - 2.6 * dt)
+        p.v = p.v + vec(0, -g * 9.8 * dt, 0)
+        p.v = p.v + vec(
+            noise(p.pos.x * 0.7, p.pos.y * 0.7, p.pos.z * 0.7, step * 3),
+            noise(p.pos.x * 0.7, p.pos.y * 0.7, p.pos.z * 0.7, step * 3 + 1),
+            noise(p.pos.x * 0.7, p.pos.y * 0.7, p.pos.z * 0.7, step * 3 + 2)
+        ) * (vol * 0.6 * dt)
+        p.pos = p.pos + p.v * dt
+    }
+}

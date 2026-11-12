@@ -1,0 +1,29 @@
+# spell v1 name="烈焰喷泉"
+# 锥形底 + 持续向上加速 + 阻尼：粒子从底部喷出、越飞越慢，和龙卷完全不同的力组合。
+
+on cast {
+    emit {
+        element: fire
+        count: 1800
+        life: 3.5
+        shape: cone { radius: 1.2, height: 3.0 }
+        at: here()
+    }
+}
+
+on tick(dt) {
+    let g = gravity(fire)
+    let vol = volatility(fire)
+    let jet = 16.0 * (1 - smoothstep(0.6, 1.0, time / life))
+
+    for p in particles {
+        p.v = p.v + vec(0, (jet - g * 9.8) * dt, 0)
+        p.v = p.v * max(0, 1 - 1.1 * dt)
+        p.v = p.v + vec(
+            noise(p.pos.x * 0.6, p.pos.y * 0.6, p.pos.z * 0.6, step * 3),
+            noise(p.pos.x * 0.6, p.pos.y * 0.6, p.pos.z * 0.6, step * 3 + 1),
+            noise(p.pos.x * 0.6, p.pos.y * 0.6, p.pos.z * 0.6, step * 3 + 2)
+        ) * (vol * 0.5 * dt)
+        p.pos = p.pos + p.v * dt
+    }
+}

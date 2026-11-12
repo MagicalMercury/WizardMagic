@@ -5,11 +5,11 @@ import com.wizardmagic.core.fusion.ElementFusion;
 import net.minecraft.resources.ResourceLocation;
 
 /**
- * 一个「要素」——不是物品，也不是方块，而是注册表里的独立条目。
+ * 一个「元素」——不是物品，也不是方块，而是注册表里的独立条目。
  *
- * <p>设计参考神秘时代的 {@code Aspect}：要素是一等数据对象，带稳定 id、阶数与配方；
+ * <p>设计参考神秘时代的 {@code Aspect}：元素是一等数据对象，带稳定 id、阶数与配方；
  * 图标只是 GUI 贴图（{@code textures/gui/element/<id>.png}），物品与方块通过
- * 容器接口暴露自己含有的要素。</p>
+ * 容器接口暴露自己含有的元素。</p>
  */
 public final class Element {
 

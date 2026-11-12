@@ -35,10 +35,12 @@ src/main/java/com/wizardmagic/
 │   └── crucible/           # 坩埚状态与渲染契约（纯 Java）
 ├── core/                   # 引擎核心
 │   ├── elements/           # 元素场、扩散/平流、流体求解、场生成、事件接线
-│   └── fusion/             # 要素合成数据模型
+│   └── fusion/             # 元素合成数据模型
 └── common/                 # 平台与内容层
     ├── blocks/             # 方块与方块实体
-    ├── client/             # 客户端渲染（粒子管线、坩埚着色）
+    ├── client/             # 客户端渲染
+    │   ├── shader/         # 自建 GL 着色器：加载/编译基类、相机基向量、坩埚液面管线
+    │   └── fx/             # 粒子效果渲染（Spark 实例化管线）
     ├── command/            # 调试命令
     ├── fx/                 # 粒子效果请求
     ├── network/            # 网络通道与数据包
