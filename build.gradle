@@ -184,6 +184,51 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+// ------------------------------------------------ 离机自检（不启动 Minecraft）
+//
+// 两个入口都是普通 main()，不依赖 JUnit，避免给 mod 引入测试依赖。
+//   gradlew spellCheck        门禁：脚本语言 + 粒子层，跳过性能测量（build 时自动跑）
+//   gradlew spellScriptCheck  只跑脚本语言自检
+//   gradlew spellLawsCheck    只跑粒子层自检
+//   gradlew spellPerf         性能测量（新 JVM、预热后测，耗时较长，不进 check）
+tasks.withType(JavaExec).configureEach {
+    // 自检输出全是中文，强制 UTF-8 免得控制台一片乱码
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
+}
+
+tasks.register('spellScriptCheck', JavaExec) {
+    group = 'verification'
+    description = '法术脚本自检：语法/求值/寄存器机与解释器逐位对拍/字节码缓存'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
+    args 'quick'
+}
+
+tasks.register('spellLawsCheck', JavaExec) {
+    group = 'verification'
+    description = '法术粒子层自检：元素表/噪声/确定性/形状采样/单步成本'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.SpellSelfCheck'
+}
+
+tasks.register('spellPerf', JavaExec) {
+    group = 'verification'
+    description = '性能测量：解释器 vs 寄存器机（新 JVM，800 步预热）'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
+    args 'perf'
+}
+
+tasks.register('spellCheck') {
+    group = 'verification'
+    description = '离机自检门禁（不含性能测量）'
+    dependsOn 'spellScriptCheck', 'spellLawsCheck'
+}
+
+tasks.named('check') {
+    dependsOn 'spellCheck'
+}
+
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
 idea {
     module {
