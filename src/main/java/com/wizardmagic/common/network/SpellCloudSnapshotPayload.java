@@ -30,6 +30,10 @@ public class SpellCloudSnapshotPayload
     public final double originX;
     public final double originY;
     public final double originZ;
+    /** 形状朝向（形状本地 +Y 轴指向它） */
+    public final double faceX;
+    public final double faceY;
+    public final double faceZ;
     public final float lifeSec;
     public final float drag;
     public final float energyInit;
@@ -48,6 +52,7 @@ public class SpellCloudSnapshotPayload
     public SpellCloudSnapshotPayload(int id, int elementId, int count, long seed,
                                      String shapeId, ShapeParams shapeParams,
                                      double originX, double originY, double originZ, float lifeSec,
+                                     double faceX, double faceY, double faceZ,
                                      float drag, float energyInit, float energyDecay,
                                      boolean persistent, int ageSteps, double[] state,
                                      String scriptId, String scriptSource, Map<String, Value> scriptVars)
@@ -61,6 +66,9 @@ public class SpellCloudSnapshotPayload
         this.originX = originX;
         this.originY = originY;
         this.originZ = originZ;
+        this.faceX = faceX;
+        this.faceY = faceY;
+        this.faceZ = faceZ;
         this.lifeSec = lifeSec;
         this.drag = drag;
         this.energyInit = energyInit;
@@ -83,6 +91,9 @@ public class SpellCloudSnapshotPayload
         buf.writeDouble(payload.originX);
         buf.writeDouble(payload.originY);
         buf.writeDouble(payload.originZ);
+        buf.writeDouble(payload.faceX);
+        buf.writeDouble(payload.faceY);
+        buf.writeDouble(payload.faceZ);
         buf.writeFloat(payload.lifeSec);
         buf.writeFloat(payload.drag);
         buf.writeFloat(payload.energyInit);
@@ -110,6 +121,9 @@ public class SpellCloudSnapshotPayload
         double ox = buf.readDouble();
         double oy = buf.readDouble();
         double oz = buf.readDouble();
+        double fx = buf.readDouble();
+        double fy = buf.readDouble();
+        double fz = buf.readDouble();
         float life = buf.readFloat();
         float drag = buf.readFloat();
         float energyInit = buf.readFloat();
@@ -123,7 +137,7 @@ public class SpellCloudSnapshotPayload
             state[i] = buf.readDouble();
         }
         return new SpellCloudSnapshotPayload(id, elementId, count, seed, shapeId, params,
-                ox, oy, oz, life, drag, energyInit, energyDecay, persistent, ageSteps, state,
+                ox, oy, oz, life, fx, fy, fz, drag, energyInit, energyDecay, persistent, ageSteps, state,
                 SpellScriptCodec.readId(buf), SpellScriptCodec.readSource(buf),
                 SpellScriptCodec.readVars(buf));
     }

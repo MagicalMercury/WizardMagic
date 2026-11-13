@@ -1,0 +1,82 @@
+# spell v1 name="陨火"
+# 一团火球砸下来，撞到方块的瞬间**整团粒子换阵型**：原来那团球摊成贴着撞击面的一个环，
+# 然后由 on tick 让它向外匀速扩散——这就是冲击波。撞地是一个趴在地上的环，撞墙就是一个
+# 竖着的环（环所在的平面由 hit.normal 决定，所以撞击面是什么角度都对）。
+#
+# 三件事写在这里示范：
+#   1. 球"消失"不需要引擎提供新指令：同一团粒子被摆成环，球自然就没了；
+#   2. 环怎么扩散也不用引擎动画：tick 里每步沿"远离撞击点"的方向推一下，半径就匀速变大；
+#   3. 烟要往上飘，所以 emit 里写 inherit: false —— 子云不带脚本，只按元素定律走
+#      （雾的浮力是负的，会自己上浮），否则它会继承这颗火球的"往下砸"。
+
+on cast {
+    # phase: 0 = 下坠的火球，1 = 贴面扩散的冲击波
+    let phase = 0
+    # 撞击点（on hit 写进来，tick 只读）
+    let cx = 0.0
+    let cy = 0.0
+    let cz = 0.0
+    emit {
+        element: fire
+        count: 1000
+        life: 2.0
+        shape: sphere { radius: 0.25 }
+        at: aim(6) + vec(0, 2, 0)
+    }
+}
+
+on tick(dt) {
+    if (phase == 0) {
+        for p in particles {
+            p.v = p.v + vec(0, -18.0 * dt, 0)
+            p.pos = p.pos + p.v * dt
+        }
+    }
+    if (phase == 1) {
+        # 每颗粒子沿"自己相对撞击点"的方向往外挪，半径就匀速变大；同时熄火
+        for p in particles {
+            let d = p.pos - vec(cx, cy, cz)
+            p.pos = p.pos + normalize(d) * (9.0 * dt)
+            p.energy = p.energy * max(0, 1 - 1.8 * dt)
+        }
+    }
+}
+
+on hit {
+    if (phase == 0) {
+        phase = 1
+        cx = hit.pos.x
+        cy = hit.pos.y
+        cz = hit.pos.z
+
+        # 在"垂直于撞击面"的平面里取两条正交切向：n 朝上时用 X 当参考，否则用 Y
+        let n = hit.normal
+        let ref = vec(0, 1, 0)
+        if (abs(n.y) > 0.9) {
+            ref = vec(1, 0, 0)
+        }
+        let t1 = normalize(cross(n, ref))
+        let t2 = cross(n, t1)
+
+        # 整团粒子摊成环：角度用每粒固定的随机数，半径再加一个 rand()，看起来不是螺旋
+        for p in particles {
+            let ang = p.r * 6.2831853
+            let rad = 0.35 + 1.1 * rand()
+            p.pos = hit.pos + n * 0.2 + (t1 * cos(ang) + t2 * sin(ang)) * rad
+            p.v = vec(0, 0, 0)
+        }
+
+        # 一口往上飘的余烟
+        emit {
+            element: mist
+            count: 160
+            life: 1.6
+            shape: sphere { radius: 0.9 }
+            at: hit.pos + n * 0.4
+            inherit: false
+        }
+
+        # 打伤害：落点默认就是撞击点，施法者自己会被跳过（见 McHurtSink）
+        hurt(4.0, 8.0)
+    }
+}

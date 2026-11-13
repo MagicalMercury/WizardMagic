@@ -24,13 +24,35 @@ public final class McHost implements Host
     private final double hereX;
     private final double hereY;
     private final double hereZ;
+    private final double lookX;
+    private final double lookY;
+    private final double lookZ;
 
     public McHost(ServerLevel level, Vec3 here)
+    {
+        this(level, here, 0.0, 0.0, 1.0);
+    }
+
+    public McHost(ServerLevel level, Vec3 here, Vec3 look)
     {
         this.level = level;
         this.hereX = here.x;
         this.hereY = here.y;
         this.hereZ = here.z;
+        double len = look.length();
+        if (!(len > 1.0E-6))
+        {
+            look = new Vec3(0.0, 0.0, 1.0);
+            len = 1.0;
+        }
+        this.lookX = look.x / len;
+        this.lookY = look.y / len;
+        this.lookZ = look.z / len;
+    }
+
+    public McHost(ServerLevel level, Vec3 here, double lookX, double lookY, double lookZ)
+    {
+        this(level, here, new Vec3(lookX, lookY, lookZ));
     }
 
     @Override
@@ -79,6 +101,24 @@ public final class McHost implements Host
     public double hereZ()
     {
         return hereZ;
+    }
+
+    @Override
+    public double lookX()
+    {
+        return lookX;
+    }
+
+    @Override
+    public double lookY()
+    {
+        return lookY;
+    }
+
+    @Override
+    public double lookZ()
+    {
+        return lookZ;
     }
 
     /** 融合元素目前不映射到基础元素场 */

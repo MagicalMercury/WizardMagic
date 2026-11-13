@@ -128,4 +128,25 @@ public final class SpellElements
         String id = id(index);
         return id != null && COLORS.containsKey(id);
     }
+
+    /**
+     * 该元素默认的方块碰撞策略。
+     *
+     * <p>「不穿方块」是所有实体元素的默认值；气、雾、虚空、光、雷、动力这几种
+     * 本来就是「无形」的，穿过方块才是对的。策略不写进脚本——{@code on tick}
+     * 禁止读世界，碰撞是框架在脚本之后做的后处理（见 {@link ParticleCollider}）。</p>
+     */
+    public static CollisionMode collision(int index)
+    {
+        String id = id(index);
+        if (id == null)
+        {
+            return CollisionMode.NONE;
+        }
+        return switch (id)
+        {
+            case "air", "mist", "void", "light", "thunder", "motion" -> CollisionMode.NONE;
+            default -> CollisionMode.INELASTIC;
+        };
+    }
 }

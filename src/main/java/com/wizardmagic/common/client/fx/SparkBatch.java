@@ -187,6 +187,16 @@ public final class SparkBatch
         instanceDirty = true;
     }
 
+    /**
+     * 要求重建实例表。
+     *
+     * <p><b>这是"请求"，不是"立刻做"</b>：真正的重建在 {@link #tick()} 里做，每 tick 一次。
+     * 以前这里有 {@code rebuildNow()} 让包/快照处理路径立即重建，而 {@link #tick()} 本来
+     * 就会重建一次——同一条时间线上序列化两遍 26 万实例。spark 采样显示客户端渲染线程里
+     * {@code SpellCloudClient.fill} 占 8.28%，其中一半就是这么白烧的。</p>
+     *
+     * <p>{@code tick()} 在渲染之前跑，所以延迟到 tick 不会让画面晚一帧。</p>
+     */
     public void markDirty() {
         instanceDirty = true;
     }
@@ -196,11 +206,6 @@ public final class SparkBatch
         this.spellSource = source;
         this.spellCount = 0;
         instanceDirty = true;
-    }
-
-    /** 立即重建实例表（法术云每 tick、生成、销毁后调用） */
-    public void rebuildNow() {
-        rebuildInstances();
     }
 
     /** 上一帧写入的法术实例数（调试用） */

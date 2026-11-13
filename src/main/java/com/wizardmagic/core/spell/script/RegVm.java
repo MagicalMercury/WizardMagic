@@ -4,6 +4,7 @@ import com.wizardmagic.api.spell.SpellMath;
 import com.wizardmagic.core.spell.SpellCloud;
 import com.wizardmagic.core.spell.SpellConstants;
 import com.wizardmagic.core.spell.SpellNoise;
+import com.wizardmagic.core.spell.SpellRandom;
 
 /**
  * 寄存器机后端：执行 {@link FastProgram} 编出的寄存器指令。
@@ -139,6 +140,8 @@ final class RegVm
     static final int OP_JZ = 60;
     /** [JMP][目标下标] */
     static final int OP_JMP = 61;
+    /** [JNZ|a][目标下标] r[a] != 0 时跳（{@code or} 的短路用） */
+    static final int OP_JNZ = 85;
 
     // 一元数学：d, a
     static final int OP_ABS = 62;
@@ -180,6 +183,32 @@ final class RegVm
     static final int OP_PICK = 83;
     /** [NOISE|d|x|y][z][stream] */
     static final int OP_NOISE = 84;
+    /**
+     * d ← 本步第 seq 次 {@code rand()}，{@code seq} 从这次 {@link #execute} 的 0 开始。
+     *
+     * <p>序列是按<b>粒子顺序</b>消耗的（和第 0 粒的第 1 次、第 2 次…）：所以带 {@code rand}
+     * 的循环体不能被切段并行——{@code FastProgram#parallelSafe()} 会因为这条指令返回 false，
+     * 整朵云退回"一次跑完"。</p>
+     */
+    static final int OP_RAND = 86;
+    /** [STF1|0|a|b] fv[a] ← r[b]：写回 cast 变量（整段跑完后由 FastProgram 搬回 Env） */
+    static final int OP_STF1 = 87;
+    /** [STF3|0|a|b] fv[a..a+2] ← r[b..b+2] */
+    static final int OP_STF3 = 88;
+    /** [TANGENT_UP|d|a|b][up] 绕任意轴的水平切向（第三参是轴向寄存器） */
+    static final int OP_TANGENT_UP = 89;
+    /** [RADIAL_UP|d|a|b][up] 绕任意轴的径向 */
+    static final int OP_RADIAL_UP = 90;
+    /** [ROTATE|d|a|b][angle] 绕轴 b 旋转 a 角度 r[angle] */
+    static final int OP_ROTATE = 91;
+    /** d = a % b（除数为 0 时抛错，与解释器同一语义） */
+    static final int OP_MOD_N = 92;
+    /** d = a 的符号：-1 / 0 / 1 */
+    static final int OP_SIGN = 93;
+    /** d = pow(a, b) */
+    static final int OP_POW = 94;
+    /** d = atan2(a, b) */
+    static final int OP_ATAN2 = 95;
 
     // ---------------------------------------------------------------- 热循环
 
@@ -187,18 +216,27 @@ final class RegVm
      * 逐粒子跑一遍循环体。
      *
      * @param code   指令流
+     * @param pos    与 {@code code} 一一对应的源码位置（{@code line<<12|col}），只在报错时读
      * @param k      常量表
      * @param r      寄存器帧（每次调用新建，逐粒子复用）
      * @param fv     cast 变量快照
      * @param hv     外提常量
-     * @param count  粒子数
+     * @param from   段起点（含）
+     * @param to     段终点（不含）
      * @param time   当前时刻（秒），{@code p.age}/{@code p.axis}/{@code p.targetR} 用
+     * @param randSeq 这一步已经消耗了多少次 {@code rand()}（同一朵云可能有多个循环，
+     *                序列必须接着上一条循环往下数，否则和解释器对不上）
+     * @return 跑完之后消耗到的序号
      */
-    static void execute(int[] code, double[] k, double[] r, double[] fv, double[] hv,
-            SpellCloud cloud, int count, double time)
+    static int execute(int[] code, int[] pos, double[] k, double[] r, double[] fv, double[] hv,
+            SpellCloud cloud, int from, int to, double time, int randSeq)
     {
         final int n = code.length;
-        for (int i = 0; i < count; i++)
+        final double[] axis = new double[3];
+        // rand() 的序列：每步从调用方给的序号开始，按粒子顺序与程序顺序消耗（与解释器同一条式子）
+        final long seed = cloud.castSeed;
+        final int step = cloud.ageSteps();
+        for (int i = from; i < to; i++)
         {
             // p.axis / p.targetR 每粒每步只算一次：形状采样里有 sin/cos 和几次 pow
             boolean axisReady = false;
@@ -234,111 +272,51 @@ final class RegVm
                         break;
                     }
                     case OP_LDF1:
-                        r[(w >>> DST_SHIFT) & FIELD] = fv[(w >>> A_SHIFT) & FIELD];
-                        break;
                     case OP_LDF3:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int s = (w >>> A_SHIFT) & FIELD;
-                        r[d] = fv[s];
-                        r[d + 1] = fv[s + 1];
-                        r[d + 2] = fv[s + 2];
-                        break;
-                    }
                     case OP_LDH1:
-                        r[(w >>> DST_SHIFT) & FIELD] = hv[(w >>> A_SHIFT) & FIELD];
-                        break;
                     case OP_LDH3:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int s = (w >>> A_SHIFT) & FIELD;
-                        r[d] = hv[s];
-                        r[d + 1] = hv[s + 1];
-                        r[d + 2] = hv[s + 2];
+                        loadConst(w, r, fv, hv);
                         break;
-                    }
 
                     // ------------------------------------------------ 粒子读
                     case OP_LPOS:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        r[d] = cloud.x(i);
-                        r[d + 1] = cloud.y(i);
-                        r[d + 2] = cloud.z(i);
-                        break;
-                    }
-                    case OP_LPOSX:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.x(i);
-                        break;
-                    case OP_LPOSY:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.y(i);
-                        break;
-                    case OP_LPOSZ:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.z(i);
-                        break;
                     case OP_LVEL:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        r[d] = cloud.velX(i);
-                        r[d + 1] = cloud.velY(i);
-                        r[d + 2] = cloud.velZ(i);
+                    case OP_LANCHOR:
+                    case OP_LLOCAL:
+                        loadVec(w, r, cloud, i);
                         break;
-                    }
+                    case OP_LPOSX:
+                    case OP_LPOSY:
+                    case OP_LPOSZ:
+                        loadPosComp(w, r, cloud, i);
+                        break;
                     case OP_LVELX:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.velX(i);
-                        break;
                     case OP_LVELY:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.velY(i);
-                        break;
                     case OP_LVELZ:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.velZ(i);
+                        loadVelComp(w, r, cloud, i);
+                        break;
+                    case OP_LANCHORX:
+                    case OP_LANCHORY:
+                    case OP_LANCHORZ:
+                        loadAnchorComp(w, r, cloud, i);
+                        break;
+                    case OP_LLOCALX:
+                    case OP_LLOCALY:
+                    case OP_LLOCALZ:
+                        loadLocalComp(w, r, cloud, i);
                         break;
                     case OP_LENERGY:
                         r[(w >>> DST_SHIFT) & FIELD] = cloud.energy(i);
-                        break;
-                    case OP_LANCHOR:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        r[d] = cloud.anchorX(i);
-                        r[d + 1] = cloud.anchorYWorld(i);
-                        r[d + 2] = cloud.anchorZ(i);
-                        break;
-                    }
-                    case OP_LANCHORX:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.anchorX(i);
-                        break;
-                    case OP_LANCHORY:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.anchorYWorld(i);
-                        break;
-                    case OP_LANCHORZ:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.anchorZ(i);
-                        break;
-                    case OP_LLOCAL:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        r[d] = cloud.x(i) - cloud.originX;
-                        r[d + 1] = cloud.y(i) - cloud.originY;
-                        r[d + 2] = cloud.z(i) - cloud.originZ;
-                        break;
-                    }
-                    case OP_LLOCALX:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.x(i) - cloud.originX;
-                        break;
-                    case OP_LLOCALY:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.y(i) - cloud.originY;
-                        break;
-                    case OP_LLOCALZ:
-                        r[(w >>> DST_SHIFT) & FIELD] = cloud.z(i) - cloud.originZ;
                         break;
                     case OP_LAXIS:
                     {
                         int d = (w >>> DST_SHIFT) & FIELD;
                         if (!axisReady)
                         {
-                            double[] a = cloud.axisAt(i, time);
-                            ax = a[0];
-                            ay = a[1];
-                            az = a[2];
+                            cloud.axisAt(i, time, axis);
+                            ax = axis[0];
+                            ay = axis[1];
+                            az = axis[2];
                             axisReady = true;
                         }
                         r[d] = ax;
@@ -353,10 +331,10 @@ final class RegVm
                         int op = w >>> 24;
                         if (!axisReady)
                         {
-                            double[] a = cloud.axisAt(i, time);
-                            ax = a[0];
-                            ay = a[1];
-                            az = a[2];
+                            cloud.axisAt(i, time, axis);
+                            ax = axis[0];
+                            ay = axis[1];
+                            az = axis[2];
                             axisReady = true;
                         }
                         int d = (w >>> DST_SHIFT) & FIELD;
@@ -383,187 +361,57 @@ final class RegVm
 
                     // ------------------------------------------------ 粒子写
                     case OP_SPOS:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setPos(i, r[s], r[s + 1], r[s + 2]);
-                        break;
-                    }
                     case OP_SPOSX:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setPos(i, r[s], cloud.y(i), cloud.z(i));
-                        break;
-                    }
                     case OP_SPOSY:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setPos(i, cloud.x(i), r[s], cloud.z(i));
-                        break;
-                    }
                     case OP_SPOSZ:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setPos(i, cloud.x(i), cloud.y(i), r[s]);
+                        storePos(w, r, cloud, i);
                         break;
-                    }
                     case OP_SVEL:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setVel(i, r[s], r[s + 1], r[s + 2]);
-                        break;
-                    }
                     case OP_SVELX:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setVel(i, r[s], cloud.velY(i), cloud.velZ(i));
-                        break;
-                    }
                     case OP_SVELY:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setVel(i, cloud.velX(i), r[s], cloud.velZ(i));
-                        break;
-                    }
                     case OP_SVELZ:
-                    {
-                        int s = (w >>> DST_SHIFT) & FIELD;
-                        cloud.setVel(i, cloud.velX(i), cloud.velY(i), r[s]);
+                        storeVel(w, r, cloud, i);
                         break;
-                    }
                     case OP_SENERGY:
                         cloud.setEnergy(i, r[(w >>> DST_SHIFT) & FIELD]);
                         break;
 
                     // ------------------------------------------------ 标量算术
                     case OP_ADD_N:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] + r[w & FIELD];
-                        break;
                     case OP_SUB_N:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] - r[w & FIELD];
-                        break;
                     case OP_MUL_N:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] * r[w & FIELD];
+                    case OP_NEG_N:
+                        arithN(w, r);
                         break;
                     case OP_DIV_N:
-                    {
-                        double den = r[w & FIELD];
-                        if (den == 0.0)
-                        {
-                            throw divZero();
-                        }
-                        r[(w >>> DST_SHIFT) & FIELD] = r[(w >>> A_SHIFT) & FIELD] / den;
+                    case OP_DIV_SCALE:
+                        // 除零要用当前指令的位置，所以把 ip 传进去（冷路径才用）
+                        arithDiv(w, r, pos, pc - 1);
                         break;
-                    }
-                    case OP_NEG_N:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        r[d] = -r[(w >>> A_SHIFT) & FIELD];
+                    case OP_MOD_N:
+                        arithMod(w, r, pos, pc - 1);
                         break;
-                    }
 
                     // ------------------------------------------------ 向量算术
                     case OP_ADD_V:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        int b = w & FIELD;
-                        double a0 = r[a];
-                        double a1 = r[a + 1];
-                        double a2 = r[a + 2];
-                        r[d] = a0 + r[b];
-                        r[d + 1] = a1 + r[b + 1];
-                        r[d + 2] = a2 + r[b + 2];
-                        break;
-                    }
                     case OP_SUB_V:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        int b = w & FIELD;
-                        double a0 = r[a];
-                        double a1 = r[a + 1];
-                        double a2 = r[a + 2];
-                        r[d] = a0 - r[b];
-                        r[d + 1] = a1 - r[b + 1];
-                        r[d + 2] = a2 - r[b + 2];
-                        break;
-                    }
                     case OP_SCALE:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        double s = r[w & FIELD];
-                        r[d] = r[a] * s;
-                        r[d + 1] = r[a + 1] * s;
-                        r[d + 2] = r[a + 2] * s;
-                        break;
-                    }
-                    case OP_DIV_SCALE:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        double s = r[w & FIELD];
-                        if (s == 0.0)
-                        {
-                            throw divZero();
-                        }
-                        r[d] = r[a] / s;
-                        r[d + 1] = r[a + 1] / s;
-                        r[d + 2] = r[a + 2] / s;
-                        break;
-                    }
                     case OP_NEG_V:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        r[d] = -r[a];
-                        r[d + 1] = -r[a + 1];
-                        r[d + 2] = -r[a + 2];
+                        arithV(w, r);
                         break;
-                    }
 
                     // ------------------------------------------------ 比较与逻辑
                     case OP_LT:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] < r[w & FIELD] ? 1.0 : 0.0;
-                        break;
                     case OP_LE:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] <= r[w & FIELD] ? 1.0 : 0.0;
-                        break;
                     case OP_GT:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] > r[w & FIELD] ? 1.0 : 0.0;
-                        break;
                     case OP_GE:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] >= r[w & FIELD] ? 1.0 : 0.0;
-                        break;
                     case OP_EQ_N:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] == r[w & FIELD] ? 1.0 : 0.0;
-                        break;
                     case OP_NE_N:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[(w >>> A_SHIFT) & FIELD] != r[w & FIELD] ? 1.0 : 0.0;
-                        break;
                     case OP_AND:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                (r[(w >>> A_SHIFT) & FIELD] != 0.0 && r[w & FIELD] != 0.0) ? 1.0 : 0.0;
-                        break;
                     case OP_OR:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                (r[(w >>> A_SHIFT) & FIELD] != 0.0 || r[w & FIELD] != 0.0) ? 1.0 : 0.0;
-                        break;
                     case OP_NOT:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        r[d] = r[(w >>> A_SHIFT) & FIELD] == 0.0 ? 1.0 : 0.0;
+                        compare(w, r);
                         break;
-                    }
 
                     // ------------------------------------------------ 控制流
                     case OP_JZ:
@@ -579,37 +427,33 @@ final class RegVm
                     case OP_JMP:
                         pc = code[pc];
                         break;
+                    case OP_JNZ:
+                    {
+                        int c = (w >>> DST_SHIFT) & FIELD;
+                        int t = code[pc++];
+                        if (r[c] != 0.0)
+                        {
+                            pc = t;
+                        }
+                        break;
+                    }
 
                     // ------------------------------------------------ 数学
                     case OP_ABS:
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.abs(r[(w >>> A_SHIFT) & FIELD]);
-                        break;
                     case OP_SQRT:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                Math.sqrt(Math.max(0.0, r[(w >>> A_SHIFT) & FIELD]));
-                        break;
+                    case OP_SIGN:
                     case OP_SIN:
-                        r[(w >>> DST_SHIFT) & FIELD] = SpellMath.sin(r[(w >>> A_SHIFT) & FIELD]);
-                        break;
                     case OP_COS:
-                        r[(w >>> DST_SHIFT) & FIELD] = SpellMath.cos(r[(w >>> A_SHIFT) & FIELD]);
-                        break;
                     case OP_EXP:
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.exp(r[(w >>> A_SHIFT) & FIELD]);
-                        break;
                     case OP_FLOOR:
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.floor(r[(w >>> A_SHIFT) & FIELD]);
-                        break;
                     case OP_ROUND:
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.round(r[(w >>> A_SHIFT) & FIELD]);
+                        math1(w, r);
                         break;
                     case OP_MIN:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                Math.min(r[(w >>> A_SHIFT) & FIELD], r[w & FIELD]);
-                        break;
                     case OP_MAX:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                Math.max(r[(w >>> A_SHIFT) & FIELD], r[w & FIELD]);
+                    case OP_POW:
+                    case OP_ATAN2:
+                        math2(w, r);
                         break;
                     case OP_CLAMP:
                     {
@@ -651,111 +495,27 @@ final class RegVm
                         break;
                     }
                     case OP_DOT:
-                    {
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        int b = w & FIELD;
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[a] * r[b] + r[a + 1] * r[b + 1] + r[a + 2] * r[b + 2];
+                        dot(w, r);
                         break;
-                    }
                     case OP_CROSS:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        int b = w & FIELD;
-                        double ax0 = r[a];
-                        double ay0 = r[a + 1];
-                        double az0 = r[a + 2];
-                        double bx0 = r[b];
-                        double by0 = r[b + 1];
-                        double bz0 = r[b + 2];
-                        r[d] = ay0 * bz0 - az0 * by0;
-                        r[d + 1] = az0 * bx0 - ax0 * bz0;
-                        r[d + 2] = ax0 * by0 - ay0 * bx0;
+                        crossV(w, r);
                         break;
-                    }
                     case OP_LEN:
-                    {
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        double a0 = r[a];
-                        double a1 = r[a + 1];
-                        double a2 = r[a + 2];
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.sqrt(a0 * a0 + a1 * a1 + a2 * a2);
-                        break;
-                    }
                     case OP_LEN_XZ:
-                    {
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        double a0 = r[a];
-                        double a2 = r[a + 2];
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.sqrt(a0 * a0 + a2 * a2);
+                        lenV(w, r);
                         break;
-                    }
                     case OP_NORMALIZE:
-                    {
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        double vx = r[a];
-                        double vy = r[a + 1];
-                        double vz = r[a + 2];
-                        double l = Math.sqrt(vx * vx + vy * vy + vz * vz);
-                        if (l < 1.0E-9)
-                        {
-                            r[d] = 0.0;
-                            r[d + 1] = 0.0;
-                            r[d + 2] = 0.0;
-                        }
-                        else
-                        {
-                            r[d] = vx / l;
-                            r[d + 1] = vy / l;
-                            r[d + 2] = vz / l;
-                        }
+                        normalizeV(w, r);
                         break;
-                    }
                     case OP_DIST:
-                    {
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        int b = w & FIELD;
-                        double dx = r[a] - r[b];
-                        double dy = r[a + 1] - r[b + 1];
-                        double dz = r[a + 2] - r[b + 2];
-                        r[(w >>> DST_SHIFT) & FIELD] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                        distV(w, r);
                         break;
-                    }
                     case OP_TANGENT:
                     case OP_RADIAL:
-                    {
-                        int op = w >>> 24;
-                        int d = (w >>> DST_SHIFT) & FIELD;
-                        int a = (w >>> A_SHIFT) & FIELD;
-                        int b = w & FIELD;
-                        double rx = r[b] - r[a];
-                        double rz = r[b + 2] - r[a + 2];
-                        double len = Math.sqrt(rx * rx + rz * rz);
-                        if (len < 1.0E-9)
-                        {
-                            r[d] = 0.0;
-                            r[d + 1] = 0.0;
-                            r[d + 2] = 0.0;
-                        }
-                        else if (op == OP_TANGENT)
-                        {
-                            r[d] = -rz / len;
-                            r[d + 1] = 0.0;
-                            r[d + 2] = rx / len;
-                        }
-                        else
-                        {
-                            r[d] = rx / len;
-                            r[d + 1] = 0.0;
-                            r[d + 2] = rz / len;
-                        }
+                        tangentV(w, r);
                         break;
-                    }
                     case OP_PICK:
-                        r[(w >>> DST_SHIFT) & FIELD] =
-                                r[((w >>> A_SHIFT) & FIELD) + (w & FIELD)];
+                        pickV(w, r);
                         break;
                     case OP_NOISE:
                     {
@@ -767,17 +527,526 @@ final class RegVm
                                 r[x], r[y], r[z], (int) Math.round(r[stream]));
                         break;
                     }
+                    case OP_RAND:
+                        r[(w >>> DST_SHIFT) & FIELD] = SpellRandom.unit(seed, step, randSeq++);
+                        break;
+                    case OP_STF1:
+                    case OP_STF3:
+                        storeFree(w, r, fv);
+                        break;
+                    case OP_TANGENT_UP:
+                    case OP_RADIAL_UP:
+                    {
+                        int d = (w >>> DST_SHIFT) & FIELD;
+                        int a = (w >>> A_SHIFT) & FIELD;
+                        int b = w & FIELD;
+                        int up = code[pc++];
+                        double ul = Math.sqrt(r[up] * r[up] + r[up + 1] * r[up + 1]
+                                + r[up + 2] * r[up + 2]);
+                        if (!(ul > 1.0E-9))
+                        {
+                            // 与解释器一致：轴向零向量是用法错误，不是"静默给零"
+                            throw error(pos, pc - 2, "tangent / radial 的第三个参数（轴向）不能是零向量");
+                        }
+                        tangentUp(r, d, a, b, up, (w >>> 24) == OP_TANGENT_UP);
+                        break;
+                    }
+                    case OP_ROTATE:
+                    {
+                        int d = (w >>> DST_SHIFT) & FIELD;
+                        int a = (w >>> A_SHIFT) & FIELD;
+                        int b = w & FIELD;
+                        int angle = code[pc++];
+                        rotateInto(r, d, a, b, angle);
+                        break;
+                    }
                     default:
-                        throw new ScriptException("未知指令 " + (w >>> 24), 1, 1);
+                        throw error(pos, pc - 1, "未知指令 " + (w >>> 24));
                 }
             }
         }
+        return randSeq;
     }
 
-    /** 冷路径：除数为 0。放在方法外，热循环里只留一条分支。 */
-    private static RuntimeException divZero()
+    // ---------------------------------------------------------------- 指令组
+    //
+    // 拆成这些小方法，是为了让 {@link #execute} 的控制流小到 IDE 的分析器能处理
+    // （以前 95 个 case 挤在一个方法里，IDE 直接放弃数据流分析）。
+    //
+    // 两条规矩：
+    //  1) 每个方法都很小（几十字节），JIT 在热调用点上会内联，机器码和拆之前一样；
+    //  2) 凡是<b>要改循环局部变量</b>的指令——pc（JZ/JMP/JNZ/LDK/多字指令）、
+    //     轴点/目标半径的惰性缓存（LAXIS*/LTARGET）、随机序号（RAND）——一律留在
+    //     execute 里内联。这些局部变量能被提升到寄存器，是热循环的关键。
+
+    /** LDF1 / LDF3 / LDH1 / LDH3：从 cast 变量快照或外提量取数 */
+    private static void loadConst(int w, double[] r, double[] fv, double[] hv)
     {
-        return new ScriptException("除以零", 1, 1);
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int s = (w >>> A_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LDF1:
+                r[d] = fv[s];
+                break;
+            case OP_LDF3:
+                r[d] = fv[s];
+                r[d + 1] = fv[s + 1];
+                r[d + 2] = fv[s + 2];
+                break;
+            case OP_LDH1:
+                r[d] = hv[s];
+                break;
+            default:
+                r[d] = hv[s];
+                r[d + 1] = hv[s + 1];
+                r[d + 2] = hv[s + 2];
+                break;
+        }
+    }
+
+    /** LPOS / LVEL / LANCHOR / LLOCAL：整向量 */
+    private static void loadVec(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LPOS:
+                r[d] = cloud.x(i);
+                r[d + 1] = cloud.y(i);
+                r[d + 2] = cloud.z(i);
+                break;
+            case OP_LVEL:
+                r[d] = cloud.velX(i);
+                r[d + 1] = cloud.velY(i);
+                r[d + 2] = cloud.velZ(i);
+                break;
+            case OP_LANCHOR:
+                r[d] = cloud.anchorX(i);
+                r[d + 1] = cloud.anchorYWorld(i);
+                r[d + 2] = cloud.anchorZ(i);
+                break;
+            default:
+                r[d] = cloud.x(i) - cloud.originX;
+                r[d + 1] = cloud.y(i) - cloud.originY;
+                r[d + 2] = cloud.z(i) - cloud.originZ;
+                break;
+        }
+    }
+
+    /** LPOSX/Y/Z 单个分量直取（每个 x/y/z 各自成组，方法小到一定被内联） */
+    private static void loadPosComp(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LPOSX: r[d] = cloud.x(i); break;
+            case OP_LPOSY: r[d] = cloud.y(i); break;
+            default: r[d] = cloud.z(i); break;
+        }
+    }
+
+    private static void loadVelComp(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LVELX: r[d] = cloud.velX(i); break;
+            case OP_LVELY: r[d] = cloud.velY(i); break;
+            default: r[d] = cloud.velZ(i); break;
+        }
+    }
+
+    private static void loadAnchorComp(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LANCHORX: r[d] = cloud.anchorX(i); break;
+            case OP_LANCHORY: r[d] = cloud.anchorYWorld(i); break;
+            default: r[d] = cloud.anchorZ(i); break;
+        }
+    }
+
+    private static void loadLocalComp(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LLOCALX: r[d] = cloud.x(i) - cloud.originX; break;
+            case OP_LLOCALY: r[d] = cloud.y(i) - cloud.originY; break;
+            default: r[d] = cloud.z(i) - cloud.originZ; break;
+        }
+    }
+
+    /** SPOS / SPOSX/Y/Z */
+    private static void storePos(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int s = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_SPOS: cloud.setPos(i, r[s], r[s + 1], r[s + 2]); break;
+            case OP_SPOSX: cloud.setPos(i, r[s], cloud.y(i), cloud.z(i)); break;
+            case OP_SPOSY: cloud.setPos(i, cloud.x(i), r[s], cloud.z(i)); break;
+            default: cloud.setPos(i, cloud.x(i), cloud.y(i), r[s]); break;
+        }
+    }
+
+    /** SVEL / SVELX/Y/Z */
+    private static void storeVel(int w, double[] r, SpellCloud cloud, int i)
+    {
+        int s = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_SVEL: cloud.setVel(i, r[s], r[s + 1], r[s + 2]); break;
+            case OP_SVELX: cloud.setVel(i, r[s], cloud.velY(i), cloud.velZ(i)); break;
+            case OP_SVELY: cloud.setVel(i, cloud.velX(i), r[s], cloud.velZ(i)); break;
+            default: cloud.setVel(i, cloud.velX(i), cloud.velY(i), r[s]); break;
+        }
+    }
+
+    /** ADD_N / SUB_N / MUL_N / NEG_N */
+    private static void arithN(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        int b = w & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_ADD_N: r[d] = r[a] + r[b]; break;
+            case OP_SUB_N: r[d] = r[a] - r[b]; break;
+            case OP_MUL_N: r[d] = r[a] * r[b]; break;
+            default: r[d] = -r[a]; break;
+        }
+    }
+
+    /** DIV_N / DIV_SCALE：除数为 0 时按源码位置抛错 */
+    private static void arithDiv(int w, double[] r, int[] pos, int ip)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        double den = r[w & FIELD];
+        if (den == 0.0)
+        {
+            throw divZero(pos, ip);
+        }
+        if ((w >>> 24) == OP_DIV_N)
+        {
+            r[d] = r[a] / den;
+            return;
+        }
+        r[d] = r[a] / den;
+        r[d + 1] = r[a + 1] / den;
+        r[d + 2] = r[a + 2] / den;
+    }
+
+    /** ADD_V / SUB_V / SCALE / NEG_V */
+    private static void arithV(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        int b = w & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_ADD_V:
+            {
+                double a0 = r[a];
+                double a1 = r[a + 1];
+                double a2 = r[a + 2];
+                r[d] = a0 + r[b];
+                r[d + 1] = a1 + r[b + 1];
+                r[d + 2] = a2 + r[b + 2];
+                break;
+            }
+            case OP_SUB_V:
+            {
+                double a0 = r[a];
+                double a1 = r[a + 1];
+                double a2 = r[a + 2];
+                r[d] = a0 - r[b];
+                r[d + 1] = a1 - r[b + 1];
+                r[d + 2] = a2 - r[b + 2];
+                break;
+            }
+            case OP_SCALE:
+            {
+                double s = r[b];
+                r[d] = r[a] * s;
+                r[d + 1] = r[a + 1] * s;
+                r[d + 2] = r[a + 2] * s;
+                break;
+            }
+            default:
+                r[d] = -r[a];
+                r[d + 1] = -r[a + 1];
+                r[d + 2] = -r[a + 2];
+                break;
+        }
+    }
+
+    /** 比较与逻辑：结果一律写 0.0 / 1.0 */
+    private static void compare(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        int b = w & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_LT: r[d] = r[a] < r[b] ? 1.0 : 0.0; break;
+            case OP_LE: r[d] = r[a] <= r[b] ? 1.0 : 0.0; break;
+            case OP_GT: r[d] = r[a] > r[b] ? 1.0 : 0.0; break;
+            case OP_GE: r[d] = r[a] >= r[b] ? 1.0 : 0.0; break;
+            case OP_EQ_N: r[d] = r[a] == r[b] ? 1.0 : 0.0; break;
+            case OP_NE_N: r[d] = r[a] != r[b] ? 1.0 : 0.0; break;
+            case OP_AND: r[d] = (r[a] != 0.0 && r[b] != 0.0) ? 1.0 : 0.0; break;
+            case OP_OR: r[d] = (r[a] != 0.0 || r[b] != 0.0) ? 1.0 : 0.0; break;
+            default: r[d] = r[a] == 0.0 ? 1.0 : 0.0; break;
+        }
+    }
+
+    /** ABS / SQRT / SIN / COS / EXP / FLOOR / ROUND */
+    private static void math1(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        double a = r[(w >>> A_SHIFT) & FIELD];
+        switch (w >>> 24)
+        {
+            case OP_ABS: r[d] = Math.abs(a); break;
+            case OP_SQRT: r[d] = Math.sqrt(Math.max(0.0, a)); break;
+            // sign 用比较写出来，避免 Math.signum 的 ±0.0 细节在两端有任何差异
+            case OP_SIGN: r[d] = a > 0.0 ? 1.0 : a < 0.0 ? -1.0 : 0.0; break;
+            case OP_SIN: r[d] = SpellMath.sin(a); break;
+            case OP_COS: r[d] = SpellMath.cos(a); break;
+            case OP_EXP: r[d] = Math.exp(a); break;
+            case OP_FLOOR: r[d] = Math.floor(a); break;
+            default: r[d] = Math.round(a); break;
+        }
+    }
+
+    /** MIN / MAX / POW / ATAN2 */
+    private static void math2(int w, double[] r)
+    {
+        int a = (w >>> A_SHIFT) & FIELD;
+        double x = r[a];
+        double y = r[w & FIELD];
+        int d = (w >>> DST_SHIFT) & FIELD;
+        switch (w >>> 24)
+        {
+            case OP_MIN: r[d] = Math.min(x, y); break;
+            case OP_MAX: r[d] = Math.max(x, y); break;
+            // StrictMath：Math.pow / Math.atan2 允许 ±1 ulp 的平台差异，两端是不同 JVM，
+            // 用 StrictMath 才能保证服务端和客户端逐位一致（解释器那边也是 StrictMath）。
+            case OP_POW: r[d] = StrictMath.pow(x, y); break;
+            default: r[d] = StrictMath.atan2(x, y); break;
+        }
+    }
+
+    /** MOD：除数为 0 与除法同语义（抛错，而不是返回 NaN） */
+    private static void arithMod(int w, double[] r, int[] pos, int ip)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        double den = r[w & FIELD];
+        if (den == 0.0)
+        {
+            // 措辞和解释器一致：脚本作者看到的应该是"取模"，不是笼统的"除以零"
+            throw error(pos, ip, "取模的除数为零");
+        }
+        r[d] = r[a] % den;
+    }
+
+    /** DOT（一行式子，内联成本为零） */
+    private static void dot(int w, double[] r)
+    {
+        int a = (w >>> A_SHIFT) & FIELD;
+        int b = w & FIELD;
+        r[(w >>> DST_SHIFT) & FIELD] = r[a] * r[b] + r[a + 1] * r[b + 1] + r[a + 2] * r[b + 2];
+    }
+
+    private static void crossV(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        int b = w & FIELD;
+        double ax0 = r[a];
+        double ay0 = r[a + 1];
+        double az0 = r[a + 2];
+        double bx0 = r[b];
+        double by0 = r[b + 1];
+        double bz0 = r[b + 2];
+        r[d] = ay0 * bz0 - az0 * by0;
+        r[d + 1] = az0 * bx0 - ax0 * bz0;
+        r[d + 2] = ax0 * by0 - ay0 * bx0;
+    }
+
+    private static void lenV(int w, double[] r)
+    {
+        int a = (w >>> A_SHIFT) & FIELD;
+        double a0 = r[a];
+        double a1 = r[a + 1];
+        double a2 = r[a + 2];
+        double sq = (w >>> 24) == OP_LEN ? a0 * a0 + a1 * a1 + a2 * a2 : a0 * a0 + a2 * a2;
+        r[(w >>> DST_SHIFT) & FIELD] = Math.sqrt(sq);
+    }
+
+    private static void normalizeV(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        int a = (w >>> A_SHIFT) & FIELD;
+        double vx = r[a];
+        double vy = r[a + 1];
+        double vz = r[a + 2];
+        double l = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        if (l < 1.0E-9)
+        {
+            r[d] = 0.0;
+            r[d + 1] = 0.0;
+            r[d + 2] = 0.0;
+        }
+        else
+        {
+            r[d] = vx / l;
+            r[d + 1] = vy / l;
+            r[d + 2] = vz / l;
+        }
+    }
+
+    private static void distV(int w, double[] r)
+    {
+        int a = (w >>> A_SHIFT) & FIELD;
+        int b = w & FIELD;
+        double dx = r[a] - r[b];
+        double dy = r[a + 1] - r[b + 1];
+        double dz = r[a + 2] - r[b + 2];
+        r[(w >>> DST_SHIFT) & FIELD] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    /** TANGENT / RADIAL：绕世界 Y 轴（旧行为） */
+    private static void tangentV(int w, double[] r)
+    {
+        tangentUp(r, (w >>> DST_SHIFT) & FIELD, (w >>> A_SHIFT) & FIELD, w & FIELD,
+                -1, (w >>> 24) == OP_TANGENT);
+    }
+
+    /**
+     * 切向 / 径向，{@code upReg < 0} 表示世界 Y 轴。
+     *
+     * <p>与解释器同一个式子：先把相对向量里的轴向分量投影掉，再取径向 / 切向。
+     * 两参版本（up = Y）投影后正好是 {@code (rx, 0, rz)}，与旧实现逐位一致。</p>
+     */
+    private static void tangentUp(double[] r, int d, int a, int b, int upReg, boolean tangent)
+    {
+        double ux = 0.0;
+        double uy = 1.0;
+        double uz = 0.0;
+        if (upReg >= 0)
+        {
+            double ul = Math.sqrt(r[upReg] * r[upReg] + r[upReg + 1] * r[upReg + 1]
+                    + r[upReg + 2] * r[upReg + 2]);
+            if (!(ul > 1.0E-9))
+            {
+                r[d] = 0.0;
+                r[d + 1] = 0.0;
+                r[d + 2] = 0.0;
+                return;
+            }
+            ux = r[upReg] / ul;
+            uy = r[upReg + 1] / ul;
+            uz = r[upReg + 2] / ul;
+        }
+        double rx = r[b] - r[a];
+        double ry = r[b + 1] - r[a + 1];
+        double rz = r[b + 2] - r[a + 2];
+        double axial = rx * ux + ry * uy + rz * uz;
+        double px = rx - ux * axial;
+        double py = ry - uy * axial;
+        double pz = rz - uz * axial;
+        double l = Math.sqrt(px * px + py * py + pz * pz);
+        if (l < 1.0E-9)
+        {
+            r[d] = 0.0;
+            r[d + 1] = 0.0;
+            r[d + 2] = 0.0;
+            return;
+        }
+        if (!tangent)
+        {
+            r[d] = px / l;
+            r[d + 1] = py / l;
+            r[d + 2] = pz / l;
+            return;
+        }
+        r[d] = (py * uz - pz * uy) / l;
+        r[d + 1] = (pz * ux - px * uz) / l;
+        r[d + 2] = (px * uy - py * ux) / l;
+    }
+
+    /** 绕任意轴旋转（右手定则），与解释器同一式子；轴退化时原样返回 */
+    private static void rotateInto(double[] r, int d, int a, int b, int angleReg)
+    {
+        int k = b;
+        double kl = Math.sqrt(r[k] * r[k] + r[k + 1] * r[k + 1] + r[k + 2] * r[k + 2]);
+        if (!(kl > 1.0E-9))
+        {
+            r[d] = r[a];
+            r[d + 1] = r[a + 1];
+            r[d + 2] = r[a + 2];
+            return;
+        }
+        double kx = r[k] / kl;
+        double ky = r[k + 1] / kl;
+        double kz = r[k + 2] / kl;
+        double angle = r[angleReg];
+        double c = SpellMath.cos(angle);
+        double s = SpellMath.sin(angle);
+        double vx = r[a];
+        double vy = r[a + 1];
+        double vz = r[a + 2];
+        double cx = ky * vz - kz * vy;
+        double cy = kz * vx - kx * vz;
+        double cz = kx * vy - ky * vx;
+        double dot = kx * vx + ky * vy + kz * vz;
+        double t = 1.0 - c;
+        r[d] = vx * c + cx * s + kx * dot * t;
+        r[d + 1] = vy * c + cy * s + ky * dot * t;
+        r[d + 2] = vz * c + cz * s + kz * dot * t;
+    }
+
+    private static void pickV(int w, double[] r)
+    {
+        r[(w >>> DST_SHIFT) & FIELD] = r[((w >>> A_SHIFT) & FIELD) + (w & FIELD)];
+    }
+
+    /** STF1 / STF3：写回 cast 变量 */
+    private static void storeFree(int w, double[] r, double[] fv)
+    {
+        int off = (w >>> A_SHIFT) & FIELD;
+        int s = w & FIELD;
+        fv[off] = r[s];
+        if ((w >>> 24) == OP_STF3)
+        {
+            fv[off + 1] = r[s + 1];
+            fv[off + 2] = r[s + 2];
+        }
+    }
+
+
+    /**
+     * 按出错指令的源码位置造异常。
+     *
+     * <p>以前这里固定写 {@code (1, 1)}——tick 里除零只能看到"第 1 行第 1 列"，等于没有。
+     * 位置表由编译器按语句填（见 {@code FastProgram.IntList#at}），热循环不读它。</p>
+     */
+    /** 冷路径：除数为 0。放在方法外，热循环里只留一条分支。 */
+    private static RuntimeException divZero(int[] pos, int ip)
+    {
+        return error(pos, ip, "除以零");
+    }
+
+    private static ScriptException error(int[] pos, int ip, String message)
+    {
+        int at = pos != null && ip >= 0 && ip < pos.length ? pos[ip] : 0;
+        return new ScriptException(message, at >>> 12, at & 0xFFF);
     }
 
     private static double smoothstep(double a, double b, double x)

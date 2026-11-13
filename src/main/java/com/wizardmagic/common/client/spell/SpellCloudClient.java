@@ -6,6 +6,8 @@ import com.wizardmagic.common.client.fx.SpellInstanceSource;
 import com.wizardmagic.common.network.SpellCloudRemovePayload;
 import com.wizardmagic.common.network.SpellCloudSnapshotPayload;
 import com.wizardmagic.common.network.SpellCloudSpawnPayload;
+import com.wizardmagic.common.spell.LevelSolidOracle;
+import com.wizardmagic.core.spell.SpellBatch;
 import com.wizardmagic.core.spell.SpellCloud;
 import com.wizardmagic.core.spell.SpellConstants;
 import com.wizardmagic.core.spell.SpellElements;
@@ -18,8 +20,10 @@ import net.minecraft.world.level.Level;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -49,6 +53,8 @@ public final class SpellCloudClient implements SpellInstanceSource
     private final Map<Integer, ClientCloud> clouds = new HashMap<>();
     /** id → {steps, hash, gameTime}，云已消失但服务端销毁包可能后到，用于比对 */
     private final Map<Integer, long[]> tombstones = new HashMap<>();
+    /** 每步批量推进用的缓冲（客户端主线程串行进入） */
+    private static final List<SpellCloud> CLIENT_BATCH = new ArrayList<>();
 
     private Level lastLevel;
     private boolean warnedFallbackColor;
@@ -104,13 +110,21 @@ public final class SpellCloudClient implements SpellInstanceSource
         {
             return;
         }
+        if (script != null)
+        {
+            // 客户端镜像同样在生成时编译，保证第一步就是编译执行（不在飞行途中换后端）
+            script.prepareFastPath(p.scriptVars);
+        }
         SpellCloud cloud = script == null
                 ? new SpellCloud(p.id, p.seed, p.elementId, count,
                         p.originX, p.originY, p.originZ, p.shapeId, p.shapeParams,
-                        p.lifeSec, p.drag, p.energyInit, p.energyDecay, p.persistent)
+                        p.lifeSec, p.drag, p.energyInit, p.energyDecay, p.persistent,
+                        p.faceX, p.faceY, p.faceZ)
                 : new SpellCloud(p.id, p.seed, p.elementId, count,
                         p.originX, p.originY, p.originZ, p.lifeSec, p.shapeId, p.shapeParams,
-                        script, p.scriptVars);
+                        script, p.scriptVars, p.faceX, p.faceY, p.faceZ);
+        // 必须在 catchUp 之前：快进那几步也要碰撞，否则和服务端状态对不上
+        cloud.setCollider(LevelSolidOracle.collideFor(Minecraft.getInstance().level, p.elementId));
         LOGGER.info("[wizardmagic] spell spawn path cloud={} scriptId='{}' srcLen={} nodes={} tickStmts={}",
                 p.id, p.scriptId, p.scriptSource.length(),
                 script == null ? -1 : script.nodes(),
@@ -138,7 +152,7 @@ public final class SpellCloudClient implements SpellInstanceSource
             warnedFallbackColor = true;
             LOGGER.info("[wizardmagic] spell: 元素 {} 尚无配色，使用临时回退色", SpellElements.id(p.elementId));
         }
-        SparkBatch.get().rebuildNow();
+        SparkBatch.get().markDirty();
     }
 
     /** 生成包里的服务端 gameTime → 已经过去的物理步数，快进补齐（上限 10 步） */
@@ -229,13 +243,20 @@ public final class SpellCloudClient implements SpellInstanceSource
         {
             return;
         }
+        if (script != null)
+        {
+            // 客户端镜像同样在生成时编译，保证第一步就是编译执行（不在飞行途中换后端）
+            script.prepareFastPath(p.scriptVars);
+        }
         SpellCloud cloud = script == null
                 ? new SpellCloud(p.id, p.seed, p.elementId, count,
                         p.originX, p.originY, p.originZ, p.shapeId, p.shapeParams,
-                        p.lifeSec, p.drag, p.energyInit, p.energyDecay, p.persistent)
+                        p.lifeSec, p.drag, p.energyInit, p.energyDecay, p.persistent,
+                        p.faceX, p.faceY, p.faceZ)
                 : new SpellCloud(p.id, p.seed, p.elementId, count,
                         p.originX, p.originY, p.originZ, p.lifeSec, p.shapeId, p.shapeParams,
-                        script, p.scriptVars);
+                        script, p.scriptVars, p.faceX, p.faceY, p.faceZ);
+        cloud.setCollider(LevelSolidOracle.collideFor(Minecraft.getInstance().level, p.elementId));
         if (p.state.length == count * 7)
         {
             cloud.restore(p.ageSteps, p.state);
@@ -249,7 +270,7 @@ public final class SpellCloudClient implements SpellInstanceSource
         LOGGER.info(String.format(Locale.ROOT,
                 "[wizardmagic] spell snapshot cloud=%d steps=%d particles=%d persistent=%b",
                 p.id, p.ageSteps, count, p.persistent));
-        SparkBatch.get().rebuildNow();
+        SparkBatch.get().markDirty();
     }
 
     public void onRemove(SpellCloudRemovePayload p)
@@ -312,7 +333,7 @@ public final class SpellCloudClient implements SpellInstanceSource
                 LOGGER.info(line);
             }
         }
-        SparkBatch.get().rebuildNow();
+        SparkBatch.get().markDirty();
     }
 
     public void clear()
@@ -320,7 +341,7 @@ public final class SpellCloudClient implements SpellInstanceSource
         clouds.clear();
         tombstones.clear();
         lastLevel = null;
-        SparkBatch.get().rebuildNow();
+        SparkBatch.get().markDirty();
     }
 
     /** 客户端区块卸载：丢掉原点在该区块的镜像云 */
@@ -333,7 +354,7 @@ public final class SpellCloudClient implements SpellInstanceSource
         {
             LOGGER.info("[wizardmagic] spell unload (chunk) chunk=({}, {}) removed={} clouds={}",
                     chunkX, chunkZ, before - clouds.size(), clouds.size());
-            SparkBatch.get().rebuildNow();
+            SparkBatch.get().markDirty();
         }
     }
 
@@ -406,12 +427,22 @@ public final class SpellCloudClient implements SpellInstanceSource
                 }
                 diagLastStepNanos = stepNanos;
             }
+            // 先把所有云的 prev 拍下来，再整批推进一步：步进本身是一次并行调度，
+            // 而不是每朵云各 fork/join 一次（云多时差 2–4 倍）。
+            CLIENT_BATCH.clear();
             for (ClientCloud c : clouds.values())
             {
                 c.copyPrev();
-                long t0 = System.nanoTime();
-                c.cloud.step();
-                long cost = System.nanoTime() - t0;
+                CLIENT_BATCH.add(c.cloud);
+            }
+            long t0 = System.nanoTime();
+            if (!CLIENT_BATCH.isEmpty())
+            {
+                SpellBatch.step(CLIENT_BATCH);
+            }
+            long cost = System.nanoTime() - t0;
+            for (ClientCloud c : clouds.values())
+            {
                 if (!c.loggedPath && c.cloud.script != null)
                 {
                     c.loggedPath = true;
@@ -419,14 +450,14 @@ public final class SpellCloudClient implements SpellInstanceSource
                             c.cloud.id, c.cloud.script.id, c.cloud.script.fastPathActive(),
                             String.format(Locale.ROOT, "%.2f", cost / 1.0E6));
                 }
-                if (cost > 3_000_000L && System.currentTimeMillis() - lastSlowLog > 1000L)
-                {
-                    lastSlowLog = System.currentTimeMillis();
-                    LOGGER.warn("[wizardmagic] slow client spell step cloud={} script={} particles={} cost={}ms",
-                            c.cloud.id, c.cloud.script == null ? "-" : c.cloud.script.id, c.cloud.count,
-                            String.format(Locale.ROOT, "%.2f", cost / 1.0E6));
-                }
             }
+            if (cost > 3_000_000L && System.currentTimeMillis() - lastSlowLog > 1000L)
+            {
+                lastSlowLog = System.currentTimeMillis();
+                LOGGER.warn("[wizardmagic] slow client spell step clouds={} cost={}ms",
+                        CLIENT_BATCH.size(), String.format(Locale.ROOT, "%.2f", cost / 1.0E6));
+            }
+            CLIENT_BATCH.clear();
             changed = true;
         }
 
@@ -449,7 +480,7 @@ public final class SpellCloudClient implements SpellInstanceSource
 
         if (changed)
         {
-            SparkBatch.get().rebuildNow();
+            SparkBatch.get().markDirty();
         }
 
         // 每秒汇总一次时钟/相位诊断（仅调试开关打开时）
@@ -513,7 +544,8 @@ public final class SpellCloudClient implements SpellInstanceSource
         {
             SpellCloud cloud = c.cloud;
             int n = cloud.count;
-            double size = 0.06 + 0.02 * Math.cbrt(n);
+            // 与碰撞共用同一个半径：球心停在「表面 ± 半径」，所以画面上刚好贴着表面
+            double size = cloud.particleRadius();
             int color = SpellElements.colorArgb(cloud.elementId);
             int cr = (color >> 16) & 0xFF;
             int cg = (color >> 8) & 0xFF;

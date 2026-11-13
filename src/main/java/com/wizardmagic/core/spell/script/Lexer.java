@@ -25,6 +25,7 @@ public final class Lexer
         KEYWORDS.put("on", Token.Kind.ON);
         KEYWORDS.put("emit", Token.Kind.EMIT);
         KEYWORDS.put("param", Token.Kind.PARAM);
+        KEYWORDS.put("call", Token.Kind.CALL);
         KEYWORDS.put("and", Token.Kind.AND);
         KEYWORDS.put("or", Token.Kind.OR);
         KEYWORDS.put("not", Token.Kind.NOT);
@@ -64,6 +65,10 @@ public final class Lexer
             else if (isIdentStart(c))
             {
                 out.add(ident(l, k));
+            }
+            else if (c == '"')
+            {
+                out.add(string(l, k));
             }
             else
             {
@@ -153,6 +158,36 @@ public final class Lexer
         return new Token(kw == null ? Token.Kind.IDENT : kw, text, 0.0, l, k);
     }
 
+    /**
+     * 字符串字面量：{@code "..."}，**没有转义**（不写反斜杠规则）。
+     *
+     * <p>只用来和引擎给的名字比较（{@code hit.block == "minecraft:ice"}），
+     * 所以不需要转义；不允许换行，读到文件结束还没闭合就报错。</p>
+     */
+    private Token string(int l, int k)
+    {
+        pos++;   // 跳过开头的引号
+        col++;
+        int start = pos;
+        while (pos < src.length() && src.charAt(pos) != '"')
+        {
+            if (src.charAt(pos) == '\n')
+            {
+                throw new ScriptException("字符串没有闭合（换行前缺一个 \"）", l, k);
+            }
+            pos++;
+            col++;
+        }
+        if (pos >= src.length())
+        {
+            throw new ScriptException("字符串没有闭合（缺一个 \"）", l, k);
+        }
+        String text = src.substring(start, pos);
+        pos++;   // 跳过结尾的引号
+        col++;
+        return new Token(Token.Kind.STR, text, 0.0, l, k);
+    }
+
     private Token punct(int l, int k)
     {
         char c = src.charAt(pos);
@@ -190,6 +225,8 @@ public final class Lexer
                 return d == '=' ? two(Token.Kind.STAR_ASSIGN, "*=", l, k) : one(Token.Kind.STAR, "*", l, k);
             case '/':
                 return d == '=' ? two(Token.Kind.SLASH_ASSIGN, "/=", l, k) : one(Token.Kind.SLASH, "/", l, k);
+            case '%':
+                return one(Token.Kind.PERCENT, "%", l, k);
             default:
                 throw new ScriptException("非法字符 '" + c + "'", l, k);
         }

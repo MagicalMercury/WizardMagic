@@ -24,7 +24,14 @@ public final class SpellClientEvents
     {
     }
 
-    @SubscribeEvent
+    /**
+     * 客户端 tick：先把本 tick 的快照应用到镜像云（只 {@code markDirty()}），
+     * 再由 {@code SparkRenderer} 统一重建一次实例表。
+     *
+     * <p><b>必须是 {@code HIGH} 优先级</b>：{@code SparkBatch.tick()} 默认优先级（NORMAL）
+     * 里会重建实例表，如果镜像云在它之后才更新，画面就会比服务端多滞后一个 tick。</p>
+     */
+    @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.HIGH)
     public static void onClientTick(TickEvent.ClientTickEvent event)
     {
         if (event.phase == TickEvent.Phase.END)

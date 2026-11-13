@@ -70,9 +70,9 @@
 | 池分两区：burst **262,144** + 光点 persist **65,535**，合计 **327,679** | `SparkBatch:31-35` |
 | 每帧 `MAX_DRAW = 262,144`；先填 burst（每 20 tick 按距离重排），光点整组放得下才画 | `SparkBatch:57, 256-275` |
 | burst 满 → 覆盖最老的（`replaceCursor`），不失败 | `SparkBatch:97-102` |
-| **实测**：`/spark burst 262144` 打满 burst 区，实机顺滑（2026-11-11） | 用户实机 |
+| **实测**：`/wmfx burst 262144` 打满 burst 区，实机顺滑（2026-11-11） | 用户实机 |
 | 网络：`SimpleChannel`，协议版本 `"1"`，现有 2 个包 | `ModNetwork` |
-| 命令注册：`RegisterCommandsEvent` + `Commands.literal(...)` | `SparkCommand`、`ElementCommand` |
+| 命令注册：`RegisterCommandsEvent` + `Commands.literal(...)` | `FxCommand`、`ElementCommand` |
 | 元素注册表：50 个 `wizardmagic:element`，顺序 = `elements.json` | `ModElements`、`ElementFusion` |
 | 元素数据**目前没有** `composition` / `color`（spec v2 才加） | `fusion/elements.json` |
 
@@ -390,7 +390,7 @@ public final class SpellCloudClient implements SpellInstanceSource {
 **P0 验收**
 - `/spell debug spawn fire 1024` → 视线前方出现一团火色粒子，`life` 秒后消失，无残留对象（`/spell debug stats` 归零）。
 - `/spell debug clear` 立即清空，光点区与 burst 区不受影响。
-- `/spark burst 262144` 仍然顺滑；两种特效同时存在时，法术实例优先占 `MAX_DRAW` 名额。
+- `/wmfx burst 262144` 仍然顺滑；两种特效同时存在时，法术实例优先占 `MAX_DRAW` 名额。
 - 客户端断线重连后无幽灵云（镜像随维度/连接清空）。
 
 ### P1 · 六定律（本次）
@@ -471,9 +471,27 @@ public final class SpellCloudClient implements SpellInstanceSource {
 - 目录：`core/spell/script/`（Token / Lexer / Ast / Parser / Value / Env / Host / Interpreter / EmitSpec / CastResult / SpellScript），**不 import Minecraft**，可离机测试
 - 执行：`on cast` 服务端一次（可读世界）→ `emit` 出云；`on tick(dt)` 双端每步各跑一次（**禁止读世界**，编译期静态检查）
 - 接入：`SpellCloud.script / scriptVars / broken`；生成包与快照包追加「脚本 id + 源码 + 云级变量」（协议 `"7"`）
-- 内置脚本：`data/wizardmagic/spells/{firestorm,frost_nova,flame_pillar}.spell`
+- 内置脚本：`data/wizardmagic/spells/{firestorm,frost_nova,flame_pillar,meteor}.spell`
 - 命令：`/spell debug run <id>`、`/spell debug scripts`
-- 实测：`ScriptSelfCheck` **checks=42 failures=0**；`SpellSelfCheck` **checks=70 failures=0**（删掉 9 条龙卷/弹簧专用断言）；3000 粒火焰风暴 **解释器 6.0 ms/步 → 寄存器机 1.34 ms/步（4.5×，单脚本新 JVM 预热后）**
+- 实测：`ScriptSelfCheck` **checks=77 failures=0**；`ScriptSpecCheck` **checks=177 failures=0**；`SpellSelfCheck` **checks=98 failures=0**；3000 粒火焰风暴 **解释器 6.0 ms/步 → 寄存器机 1.34 ms/步（4.5×，单脚本新 JVM 预热后）**
+- 方块碰撞（`CollisionMode` / `SolidOracle` / `ParticleCollider` / `LevelSolidOracle`）：**一朵云一步一次**，不是一颗粒子一次 `Entity.move()`。按当前粒子包围盒建小格位图（默认「用到哪格问哪格」，`-Dwizardmagic.spell.collision=box` 可切成整盒一次遍历，**两者结果逐位相同**，自检对拍），每粒先只看自己那格——空气就跳过；只有落在实心格的粒子才做 X/Y/Z 三轴扫掠、回退到方格表面并改速度。策略由元素决定（气/雾/虚空/光/雷/动力穿方块，其余非弹性：法向反向保留 80%）。粒子按**球**处理（半径 = 渲染的 billboard 半径，量化到 1/256 保证两端逐位一致），球心停在「表面 ± 半径」，所以画面上刚好贴着表面。离机实测：4096 点云 **0.279 ms/步（空世界）/ 0.251 ms（地面+墙）**，3000 龙卷 **0.227 / 0.239 ms**，方块查询被格位图去重到 **0.216 次/粒**
+- 事件钩子（`on hit` / `on expire`）：两者都跑在 SoA 上，能读写粒子、能 `emit` 子云；`emit` 只能写在粒子循环外（与 tick 同一条规则），否则每粒一次会把世界塞满。`on hit` 在**碰撞之后**触发，带内建记录 `hit`（`pos` 撞击点 / `vel` / `normal` 撞击面法向 / `speed` 撞前速度 / `count` 本步撞击粒子数，位置与速度是所有撞击粒子的平均）；一步最多一次，且**撞击速度必须 > 1 格/秒**才算一次事件（否则贴地静止的粒子每 50 ms 就"撞"一次，落地炸开会变成连环炸）。`hit.normal` 让"任何角度都能撞"成立：撞地是 `(0,1,0)`、撞墙是墙面朝向，拿它当冲击波所在的平面，环就会趴在地上或立在墙上。`emit` 的默认出生点按阶段取：cast 用施法者脚下、tick 用云出生点、hit 用**撞击点**、expire 用**粒子现在的质心**（不是出生点）。`emit inherit: false` 生成"不带脚本、只按元素定律飘"的子云（烟/灰尘/碎片），雾的浮力为负所以会自己上浮。`on expire` 只在**服务端**跑（云的死在服务端是权威判定，客户端等移除包），子云生成统一排在整批 join 之后。带事件的脚本**不影响快速路径**：事件体是解释器一次性求值，tick 主循环照样编成寄存器机。示例见 `meteor.spell`（火球砸地 → 整团摊成环并向外扩散 + 一口往上飘的烟）
+- 碰撞补一条**防穿墙**：快筛原先只看"球心格 + 前沿格"，而 `dt=0.1` 时 10 格/秒就是整格/步，粒子会从一格厚的墙、平台里直接穿过去。现在位移超过半格时沿位移采样中间格（`ParticleCollider#maybeSolid`），一列墙的用例钉着（顺带验出 `hit.normal` 撞墙的正确性）
+- 伤害（P3 的第一块，**只做伤害**，不做击退/点燃）：脚本里写 `hurt(半径, 伤害[, 位置])`，返回 `void`。`core/spell/script/HurtSink` 是唯一出口：服务端挂 `McHurtSink`（AABB 粗筛 + 按球精确判定、`damageSources().magic()`、**跳过施法者自己**），客户端与离机自检挂 `null`（调用即 no-op，粒子轨迹两端仍逐位一致，有 hash 用例钉着）。`hurt` 只能写在 `on hit` / `on expire`（`on tick` 会每步结算、`on cast` 还没有云，两者编译期直接拒），也不许写在粒子循环里；默认落点是**事件点**（hit = 撞击点，expire = 质心），写第三参就显式指定；终身配额 8 次、半径夹在 0.5..16、单次伤害 (0, 40]。返回值必须是 `void`——脚本要是能读到"打到了几个"，客户端读到 0、服务端读到真实值，两端立刻分叉。`meteor.spell` 已接上：撞击时 `hurt(4.0, 8.0)`
+- 服务端模拟池 262,144 → **524,288**（512 K），单朵云上限 4096 → **8192**，云数上限 64 → **128**。三个数是自洽的：`64 × 8192 = 128 × 4096 = 524,288`，所以满池可以是一朵朵大云、也可以是两倍的小云。**客户端不动**：`SparkBatch.MAX_DRAW` 仍是 262,144，模拟得起、未必看得全。单朵 8192 粒时 SoA 约 0.95 MB、快照包（`count*7` 个 double）约 459 KB（只发一次，仍在 SimpleChannel 上限内）。`spellMillion` 新增两个满池刻度实测（本机、`SpellBatch` 整批并行）：**64 朵 × 8192 = 524,288 → 51.8 ms/步（99 ns/粒，占 10 Hz 单步预算 52%）**；**128 朵 × 4096 = 524,288 → 52.0 ms/步（52%）**；单朵云多大几乎不影响每粒成本。旧的 1M 刻度仍是 95.9–99.8 ms/步（96–100%，刚好卡在窗口上）。满池纯 SoA 数组约 58 MB（每粒约 116 B），实测堆峰值 187–249 MB（含解析与临时对象，不是精确值）
+- `/spell reload`：作者主循环（改 `.spell` → reload → `run`，不重启）。编译失败会把"第几行第几列、错在哪"直接打在聊天栏；已经在飞的云不换脚本，新施法才用新代码；`/spell debug cache` 复用同一条路径
+- 投射物能力（`look()` + `fireball.spell`）：`look()` 返回施法者视线方向（已归一化），和 `here()` 一样是 **cast 专属**——`tick` 里读它两端朝向未必一致，编译期就拒。有了它，`on cast` 把方向存进云级变量（`let dir = look()`），`tick` 里 `p.pos = p.pos + dir * 速度 * dt` 就是一颗**会飞的法术**，撞到方块由 `on hit` 引爆。示例 `fireball.spell`（炎爆弹）：260 粒火球 16 格/秒飞出、撞墙那一刻炸开（900 粒火壳向外扩 + 240 粒雾往上飘 + `hurt(3.5, 9.0)`），用 `armed` 云变量保证**只炸一次**（撞地后本体还活到寿命结束，不卡就会二次爆炸），飞到期满没撞到东西则按质心在半空炸
+- **自定义事件**（`on 名字 { ... }` + `call 名字()`）：语言不加函数，但允许"给一段代码起名字"。五条规矩，全部在编译期检查：① 没有参数、没有返回值；② 被调用的事件只拿得到**根作用域**（云级变量、`dt/time/life/count/step`，以及 `on hit` 里的 `hit`），**看不到调用者的局部变量**（否则同一段代码被谁调用行为都不一样）；③ 不能写在粒子循环里（它看不到 `p`，而且会让"循环里 emit/hurt"绕过后面的保护）；④ 不能递归（`a → b → a` 编译期报错，顺便挡住了运行期栈溢出）；⑤ **按调用图判阶段**：`hurt` 只许出现在"只被 hit/expire 调用"的事件里、世界查询只许出现在"只被 cast 调用"的事件里，被 `on tick` 调用到就报错并点名是谁调的。`on tick` 里用 `call` 会掉快速路径（事件体是解释器跑的，寄存器机没法中途跳出去跑一段再回来），原因写在退化信息里。`fireball.spell` 已改用它：爆炸只写一遍（`on explode`），`on hit` 和 `on expire` 各 `call` 一次
+- **自定义事件带参数**：`on explode(radius, damage) { ... }` + `call explode(3.5, 9.0)`。实参在**调用者**作用域里求值（能传局部变量、`hit.count`），形参是被调事件的局部变量；同一事件在两处调用可以给不同值（`fireball` 撞墙 3.5/9.0、半空炸 3.0/7.0）。编译期检查：实参个数必须对上、形参不能在调用前重复、**形参不能和内建量（`dt/step/hit`…）或云级变量同名**（同名会静默遮住云级变量，赋值就写不到状态上）
+- **`hit.block` + 字符串字面量**：撞击事件多了"撞到的是什么方块"（`"minecraft:ice"` 这种 id，取本步第一个撞击格）。为此给语言加了**最小的字符串**：只能写字符串字面量、只能 `==` / `!=` 比较，不能拼接/算术、不能存进云级变量（所以生成包与存档格式不变，两端一致性也不受影响）；快速路径里没有字符串（只在事件体里用）。`SolidOracle` 多一个默认方法 `blockId()`，离机假世界不实现就返回 `null`（脚本看到空串）
+- **`on touch`（碰到生物）+ `hurt(半径 0)` + `end()`**：`on touch` 在**步末、只在服务端**触发（客户端的实体位置和主机不可能一致，拿它判定必然分叉），**每个实体一步一次**（一步最多 8 个、终身 64 次）。内建记录 `touch`：`touch.entity`（`type` / `pos` / `id` / `health`，只读）、`touch.pos`（接触点 = 第一个落在它身体里的粒子位置）。`hurt` 的半径允许写 **0**，语义是"只打碰到的那个实体"（`SpellWorld#hurtEntity`，按 id 精确命中），只有 `on touch` 里有这个对象，写在 `on hit` 里是运行期错误。新增 `end()`：立刻结束这朵云，**不触发 `on expire`**（不是寿终，是作者主动喊停），只能写在 hit / touch / expire（tick 是编译执行的，寄存器机没有中途结束的通道）。`HurtSink` 因此改名并扩成 `SpellWorld`（`hurt` / `hurtEntity` / `touches`），服务端实现是 `McSpellWorld`：先按云的包围盒查一次实体、再逐个体看"有没有粒子在它身体里"，**只在这份脚本有 `on touch` 时才会被调用**（没钩子的法术一个字节都不花）。`fireball` 接上：碰到生物 → `hurt(0, 9.0)`（只打那一只）+ 炸开 + `end()`
+- **新内建 `%` / `sign` / `pow` / `atan2`**：`%` 是和 `*` `/` 同级的运算符（语义同 Java，符号跟随被除数，**除数为零报错**而不是 NaN）；`pow`/`atan2` 用 `StrictMath`（`Math` 允许 ±1 ulp 平台差异，两端是不同 JVM 会分叉）；`sign` 用比较写出（避开 `Math.signum` 的 ±0.0 细节）。四个都进了快速路径（`OP_MOD_N/OP_SIGN/OP_POW/OP_ATAN2`），`IR_VERSION` 5 → 6，旧 `.spellc` 自动作废
+- **`here()` 语义修正 + 新增 `aim(d)`**：`here()` 一直被喂成"眼睛 + 视线 × 6"（`/spell debug run` 当初为了"在瞄准点炸开"定的），于是所有用 `at: here()` 的法术都生在你身前 6 格。现在拆成三件事：`here()` = **施法者眼睛位置**、`look()` = 视线方向、`aim(d)` = `here + look × d`。`fireball` 的枪口改成 `at: aim(1.5)`（正好身前 1.5 格）；firestorm / flame_pillar / frost_nova 改成 `at: aim(6)`、meteor 改成 `aim(6) + vec(0,2,0)` 来**保持原有观感不变**（否则它们会突然挪到施法者身上）。另外删掉 fireball 里我加的 `p.pos += vec(0, 1.6*dt, 0)`——那是在位置上叠竖直偏移，16 格/秒下弹道会向上偏 5.7°（"瞄准了却往上飘"）
+- **寿命上限 60 秒 → 1800 秒（30 分钟）**：`emit` 的 `life` 以前被静默夹到 60，作者写 `life: 240` 实际只活 60 秒（"我写了 4 分钟，怎么 1 分钟就没了"）。现在夹到 0.1..1800，常量在 `SpellConstants.MIN_LIFE_SEC / MAX_LIFE_SEC`；`SpellCloud` 构造时也夹一次，并用 long 算 `maxSteps` 再夹回 `int/4`——外部传 1e9 秒会让 `(int)` 溢出成负数、云永远不死。真要"永不消失"仍用常驻云（`/spell debug anchor`）：寿命再长也是每步都在推进粒子，60 朵 8192 粒的长驻云会一直占着 524,288 的池子
+- **碰撞：试过"高度图提前退出"，已还原**：原方案每步按包围盒的列取一次 `MOTION_BLOCKING` 高度图，`y >= 该列高度` 的格子直接判空气、整朵云都在所有列之上时整云跳过（空中云 0 次方块查询）。原理上它依赖"MOTION_BLOCKING 高度图一定盖住所有有碰撞体积的方块"，对原版方块成立，但**模组方块/高度图未及时更新/客户端高度图与服务端不同步**这些情况下会让本该发生的碰撞被跳过——空战里就是"穿过去没撞到"。收益（省方块查询）远不值得冒这个险，代码与 `SolidOracle.heights()` 接口一并删除。整盒预填（`Fill.BOX`）也确认无收益（填充成本 ∝ 盒子体积，惰性只问粒子附近的格子），保留为实验开关
+- **客户端实例表不再每 tick 重建两遍**：spark 采样显示渲染线程里 `SpellCloudClient.fill` 占 8.28%，拆开是两条路径——`SparkBatch.tick()` 的一次（5.53%）+ 包/快照处理里 `rebuildNow()` 的一次（2.75%）。现在包处理只 `markDirty()`，重建统一交给每 tick 的 `SparkBatch.tick()`（它在渲染之前跑，画面不会晚一帧）；`SpellClientEvents.onClientTick` 提到 `EventPriority.HIGH`，保证镜像云先更新、再重建实例表
+- **并行改成动态领块**：以前是"按线程数等分 P 段、调用线程跑第一段"，等分的是粒子数而不是工作量，快的段跑完就在 join 上等（spark 采样：服务端 `FutureTask.get` 的 park 13.2%、客户端 10.1%）。现在固定块大小（`max(1024, count/(线程×8))`）+ 原子计数器领块，调用线程也参与；每颗粒子照样只碰自己的下标，结果与串行逐位相同
+- **slow step 日志降噪**：整批一步超过 8 ms 才告警（原来 3 ms、注释还写成"30% 预算"——10 Hz 一步是 100 ms，3 ms 只有 3%），并且**最长每秒一条**。实机 28 万粒时每步都打，881 条 slow 日志占了整个 `latest.log` 的 75%
 - 基础定律瘦身：`Laws` 从 178 行「六定律 + 龙卷补丁」缩到 40 行通用核（元素浮力 / 线性阻尼 / 噪声扩散 / 能量衰减 / 积分）。旋涡、上升、回位弹簧、消散爆发、轴心前馈全部只在 `.spell` 里。`SpellCloud` 删掉 `spin/up/out/hold` 四个字段，生成包/快照包同步删 4 个 float，协议升 **"8"**；旧 `/spell debug firestorm` 删除（统一用 `run firestorm`）。基础核单步：4096 粒 0.41→**0.21 ms**，helix 3000 粒 0.32→**0.16 ms**。
 - 快速路径：`core/spell/script/FastProgram.java`（编译）+ `RegVm.java`（执行），静态类型推断 + **三地址寄存器机** + 操作数打包（`op<<24|dst<<16|a<<8|b`，绝大多数指令只读 1 个 int）+ 每粒轴点/目标半径缓存 + 粒子无关 `let` 外提 + 单分量取数指令（`LPOSX/LAXISY/LLOCALZ/...`）；变量即寄存器，`let`/`=` 不再有 LOAD/STORE；形状侧 `SpellShape.prepare()` 预计算每粒 `pow`；三角改用 `SpellMath`（与 `Mth.sin/cos` 同表的查表实现）；与解释器逐位一致（自检对 3 个内置脚本各跑 60–120 步比对 hash）；不满足编译条件时自动退回解释器。火焰风暴编成 **26 个寄存器 / 198 个 int（≈150 条指令）**（栈机版 522 个 int）
 - 冷热拆分：`runLoop` 不再是一个几百行的大方法。`FastProgram.prepare`（冷：校验 + 搬自由变量 + 用解释器算外提量，失败返回 `null` 且**全部循环准备完才动粒子**）+ `RegVm.execute`（热：只收 `int[]/double[]/cloud/count/time` 的静态方法）+ `RegVm.divZero`（冷抛错）。实测：单脚本隔离 1.34 ms 与栈机持平（分派只占每粒成本三分之一），**整套自检同进程连跑 8+ 脚本时 1.95–2.14 → 1.62–1.70 ms（−21%）**，"同体型去噪声"纯算术体 **1.48 → 1.00 ms（−32%）**
@@ -491,7 +509,7 @@ public final class SpellCloudClient implements SpellInstanceSource {
   - 曾经看到过"每秒抽一下"：那次是 8 朵云 / 3 种脚本同时在跑，客户端 120 步丢 5 步、lag 随寿命增长。同一份代码单云时不复现，怀疑与多脚本 JIT 反复编译/去优化有关（此前实测多脚本会把步进从 1.34 抖到 2.1 ms），**未定论**
   - 诊断（默认关，`-Dwizardmagic.script.debug=1` 才打）：客户端 `gameTime` 增量 ≠ 1 时打 `client clock delta=… drift=…`；每秒一行 `render diag: ticks= steps= gap=…ms phase=…`。复现"抽动"时先看这两个：`phase` 非 `0101` 或 `gap` 出现 50/150 = 相位/步进被撬；两者都规整 = 去查渲染或 JIT 那条线
 - 同步修正：生成包携带 `spawnGameTime`，客户端按 `expectedAge()` 快进补齐服务端在生成 tick 已走的那一步；暂停时不同步
-- 未做：tick 内 `emit`（子粒子）、事件（命中/到期）、用户函数、玩家脚本目录、符文板 UI
+- 未做：用户函数、数组/字符串、`%`/`pow`/`atan2`、每个粒子的状态槽、玩家脚本目录、符文板 UI、`on hit` 的逐粒子版本（`p.hit`）
 
 ---
 
@@ -504,12 +522,14 @@ public final class SpellCloudClient implements SpellInstanceSource {
 | 3 | 连续 spawn 65 次 | 第 65 次被拒并提示上限 |
 | 4 | `/spell debug hash`（服务端） vs 客户端 | 100 步后一致 |
 | 5 | `/spell debug stats` | p50/p99 有数，单步 ≤ 0.5 ms（4096 粒） |
-| 6 | `/spark burst 262144` + 法术同时 | 法术优先，整体仍顺滑 |
+| 6 | `/wmfx burst 262144` + 法术同时 | 法术优先，整体仍顺滑 |
 | 7 | 退出重进世界 | 无残留云（纯内存，不落盘） |
 | 8 | 关闭法术 | 元素场 `adv/flow/fluid` 的 p50/p99 与改动前一致 |
 | 9 | `/spell debug anchor fire 256` → 走远 100 格 → 回来 | 走远时粒子消失（看不见），服务端 `stats` 仍显示这朵云在推进；回来 0.5 s 内重新出现且**位置不变**（常驻云静止）；粒子不自己飘走 |
 | 10 | 常驻云 → 走到区块外让它卸载（视距调小或用 `/forceload` 反操作）再回来 | 卸载期间服务端 `stats` 的云数不变（冻结，不推进）；`latest.log` 无 `dropped`；回来继续推进 |
 | 11 | 一次性云 → 立刻把视距调到 2 走到区块外 | 日志出现 `dropped: chunk (x, z) not loaded`，`stats` 云数减少，客户端无残留 |
+| 12 | `/spell debug run meteor`（站在空地上） | 火球从头顶砸向地面，**落地那一下**炸成一团火 + 一片土，之后不再反复爆；6 s 后消散时留一口烟；日志出现 `collision=lazy` |
+| 13 | `run meteor` 对着水/岩浆（穿方块元素改 `element: air` 的脚本变体） | 气元素直接穿地不掉头，说明碰撞策略是按元素走的、不是硬编码 |
 
 ---
 

@@ -43,6 +43,10 @@ public final class Parser
         Map<String, Ast.Expr> params = new LinkedHashMap<>();
         List<Ast.Stmt> cast = null;
         List<Ast.Stmt> tick = null;
+        List<Ast.Stmt> hit = null;
+        List<Ast.Stmt> touch = null;
+        List<Ast.Stmt> expire = null;
+        Map<String, Ast.Event> events = new LinkedHashMap<>();
 
         while (!peek(Token.Kind.EOF))
         {
@@ -57,19 +61,42 @@ public final class Parser
             else if (t.kind() == Token.Kind.ON)
             {
                 next();
-                Token stage = expect(Token.Kind.IDENT, "阶段名 cast 或 tick");
+                Token stage = expect(Token.Kind.IDENT, "阶段名（cast / tick / hit / expire 或自定义事件名）");
+                String name = stage.text();
+                boolean builtIn = name.equals("cast") || name.equals("tick")
+                        || name.equals("hit") || name.equals("touch") || name.equals("expire");
+                // 形参列表：on tick(dt) 是固定的；自定义事件可以随便带；内建阶段不接受
+                List<String> formals = List.of();
                 if (peek(Token.Kind.LPAREN))
                 {
                     next();
-                    Token arg = expect(Token.Kind.IDENT, "参数名");
-                    if (!arg.text().equals("dt"))
+                    List<String> names = new ArrayList<>();
+                    while (!peek(Token.Kind.RPAREN))
                     {
-                        throw err("on tick 的参数名必须是 dt（收到 " + arg.text() + "）", arg);
+                        Token arg = expect(Token.Kind.IDENT, "参数名");
+                        names.add(arg.text());
+                        if (!peek(Token.Kind.RPAREN))
+                        {
+                            expect(Token.Kind.COMMA, ",");
+                        }
                     }
                     expect(Token.Kind.RPAREN, ")");
+                    formals = List.copyOf(names);
+                }
+                if (name.equals("tick"))
+                {
+                    if (formals.size() != 1 || !formals.get(0).equals("dt"))
+                    {
+                        throw err("on tick 的参数只能是 dt", stage);
+                    }
+                    formals = List.of();
+                }
+                else if (builtIn && !formals.isEmpty())
+                {
+                    throw err("on " + name + " 不带参数（它的数据在内建变量里", stage);
                 }
                 List<Ast.Stmt> body = block();
-                if (stage.text().equals("cast"))
+                if (name.equals("cast"))
                 {
                     if (cast != null)
                     {
@@ -77,7 +104,7 @@ public final class Parser
                     }
                     cast = body;
                 }
-                else if (stage.text().equals("tick"))
+                else if (name.equals("tick"))
                 {
                     if (tick != null)
                     {
@@ -85,14 +112,43 @@ public final class Parser
                     }
                     tick = body;
                 }
+                else if (name.equals("hit"))
+                {
+                    if (hit != null)
+                    {
+                        throw err("重复的 on hit", stage);
+                    }
+                    hit = body;
+                }
+                else if (name.equals("touch"))
+                {
+                    if (touch != null)
+                    {
+                        throw err("重复的 on touch", stage);
+                    }
+                    touch = body;
+                }
+                else if (name.equals("expire"))
+                {
+                    if (expire != null)
+                    {
+                        throw err("重复的 on expire", stage);
+                    }
+                    expire = body;
+                }
                 else
                 {
-                    throw err("未知阶段 " + stage.text() + "（只有 cast / tick）", stage);
+                    // 自定义事件：on 名字(形参) { ... }，用 call 名字(实参) 触发
+                    if (events.putIfAbsent(name, new Ast.Event(name, formals, body,
+                            stage.line(), stage.col())) != null)
+                    {
+                        throw err("重复的自定义事件 on " + name, stage);
+                    }
                 }
             }
             else
             {
-                throw err("顶层只允许 param / on cast / on tick", t);
+                throw err("顶层只允许 param / on <阶段或事件名>", t);
             }
         }
 
@@ -100,7 +156,10 @@ public final class Parser
         {
             throw new ScriptException("缺少 on cast（法术至少要有一次生成）", 1, 1);
         }
-        return new Ast.Program(params, cast, tick == null ? List.of() : tick, nodes);
+        return new Ast.Program(params, cast, tick == null ? List.of() : tick,
+                hit == null ? List.of() : hit, touch == null ? List.of() : touch,
+                expire == null ? List.of() : expire,
+                java.util.Collections.unmodifiableMap(events), nodes);
     }
 
     private List<Ast.Stmt> block()
@@ -160,6 +219,23 @@ public final class Parser
             {
                 next();
                 return n(new Ast.Emit(recordFields(), t.line(), t.col()));
+            }
+            case CALL:
+            {
+                next();
+                Token name = expect(Token.Kind.IDENT, "自定义事件名");
+                expect(Token.Kind.LPAREN, "（call 要写成 call 事件名(...)）");
+                List<Ast.Expr> args = new ArrayList<>();
+                while (!peek(Token.Kind.RPAREN))
+                {
+                    args.add(expr());
+                    if (!peek(Token.Kind.RPAREN))
+                    {
+                        expect(Token.Kind.COMMA, ",");
+                    }
+                }
+                expect(Token.Kind.RPAREN, ")");
+                return n(new Ast.CallEvent(name.text(), List.copyOf(args), t.line(), t.col()));
             }
             default:
             {
@@ -277,7 +353,7 @@ public final class Parser
     private Ast.Expr mulExpr()
     {
         Ast.Expr e = unaryExpr();
-        while (peek(Token.Kind.STAR) || peek(Token.Kind.SLASH))
+        while (peek(Token.Kind.STAR) || peek(Token.Kind.SLASH) || peek(Token.Kind.PERCENT))
         {
             Token op = next();
             e = n(new Ast.Binary(op.text(), e, unaryExpr(), op.line(), op.col()));
@@ -318,6 +394,9 @@ public final class Parser
             case TRUE:
                 next();
                 return n(new Ast.BoolLit(true, t.line(), t.col()));
+            case STR:
+                next();
+                return n(new Ast.StrLit(t.text(), t.line(), t.col()));
             case FALSE:
                 next();
                 return n(new Ast.BoolLit(false, t.line(), t.col()));

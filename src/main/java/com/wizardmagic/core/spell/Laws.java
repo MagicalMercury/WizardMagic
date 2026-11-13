@@ -26,6 +26,16 @@ public final class Laws
 
     public static void step(SpellCloud c)
     {
+        step(c, 0, c.count);
+    }
+
+    /**
+     * 只推进 {@code [from, to)} 这一段粒子（并行切段用）。
+     *
+     * <p>每颗粒子只碰自己的下标，所以切段与整段的结果逐位相同。</p>
+     */
+    public static void step(SpellCloud c, int from, int to)
+    {
         final double dt = SpellConstants.DT;
         final double gravityAccel = -SpellElements.gravity(c.elementId) * 9.8 * dt;
         final double volatility = SpellElements.volatility(c.elementId);
@@ -34,7 +44,7 @@ public final class Laws
         final long seed = c.castSeed;
         final int step = c.ageSteps();
 
-        for (int i = 0; i < c.count; i++)
+        for (int i = from; i < to; i++)
         {
             double px = c.x[i];
             double py = c.y[i];

@@ -17,18 +17,23 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 /**
- * 特效调试命令：
+ * 特效调试命令（自研 Spark 渲染器的压测/观察入口）：
  * <pre>
- * /spark burst &lt;count&gt; &lt;color&gt; [spread]
- * /spark single &lt;color&gt; &lt;size&gt;      在视线前方 6 格放一个静止的大光点，用来观察质感
+ * /wmfx burst &lt;count&gt; &lt;color&gt; [spread]
+ * /wmfx single &lt;color&gt; &lt;size&gt;      在视线前方 6 格放一个静止的大光点，用来观察质感
  * </pre>
  *
  * <p>颜色用自定义参数类型，支持 {@code #66CCFF}、{@code 0x66CCFF}、六位十六进制、十进制。</p>
+ *
+ * <p><b>为什么叫 {@code /wmfx} 而不是 {@code /spark}</b>：本项目的 "Spark" 是自研的粒子渲染器
+ * （{@code SparkBatch}/{@code SparkFx}），和 {@code Spark} 性能分析模组同名。两边都注册
+ * {@code /spark} 会把子命令合到同一个节点上，输 {@code /spark} 时两个模组的子命令混在一起，
+ * 既难看又容易按错——所以这里用 {@code /wmfx}（WizardMagic FX）避开。</p>
  */
 @Mod.EventBusSubscriber(modid = WizardMagic.MODID)
-public final class SparkCommand
+public final class FxCommand
 {
-    private SparkCommand() {
+    private FxCommand() {
     }
 
     /** 不指定颜色时的默认色 */
@@ -37,7 +42,7 @@ public final class SparkCommand
     @SubscribeEvent
     public static void register(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
-        dispatcher.register(Commands.literal("spark")
+        dispatcher.register(Commands.literal("wmfx")
                 .then(Commands.literal("burst")
                         .then(Commands.argument("count", IntegerArgumentType.integer(1, 262144))
                                 .executes(ctx -> burst(ctx, 0.8f, DEFAULT_COLOR))
@@ -48,7 +53,7 @@ public final class SparkCommand
                 .then(Commands.literal("single")
                         .then(Commands.argument("color", ColorArgument.color())
                                 .then(Commands.argument("size", FloatArgumentType.floatArg(0.1f, 16.0f))
-                                        .executes(SparkCommand::single)))));
+                                        .executes(FxCommand::single)))));
     }
 
     private static int burst(CommandContext<CommandSourceStack> ctx, float spread) {
@@ -63,7 +68,7 @@ public final class SparkCommand
         Vec3 pos = source.getPosition();
         Entity entity = source.getEntity();
         if (entity != null) {
-            // 与 /spark single 一致：从眼睛出发、沿视线前方 6 格爆发
+            // 与 /wmfx single 一致：从眼睛出发、沿视线前方 9 格爆发
             pos = entity.getEyePosition().add(entity.getLookAngle().scale(9.0));
         }
         SparkFx.burst(level, pos, count, color, spread, 0.35f, 0.35f, 50);

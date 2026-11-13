@@ -35,6 +35,14 @@ public final class Ast
     {
     }
 
+    /**
+     * 字符串字面量。只用于和"引擎给的名字"比较（目前只有 {@code hit.block}），
+     * 不能拼接、不能参与算术——见 {@link Value.Str}。
+     */
+    public record StrLit(String v, int line, int col) implements Expr
+    {
+    }
+
     /** 变量或元素 id 字面量（求值时先查作用域，再查元素表） */
     public record Var(String name, int line, int col) implements Expr
     {
@@ -94,6 +102,25 @@ public final class Ast
     {
     }
 
+    /**
+     * {@code call 名字(实参...)}：执行一个自定义事件（{@code on 名字(形参...) { ... }}）。
+     *
+     * <p>没有返回值——它不是函数，是"给一段代码起名字"。形参只是被调事件的局部变量。</p>
+     */
+    public record CallEvent(String name, List<Expr> args, int line, int col) implements Stmt
+    {
+    }
+
+    /**
+     * 自定义事件。
+     *
+     * @param params 形参名（按声明顺序；实参按位绑定）
+     * @param body   事件体
+     */
+    public record Event(String name, List<String> params, List<Stmt> body, int line, int col)
+    {
+    }
+
     public record ExprStmt(Expr expr, int line, int col) implements Stmt
     {
     }
@@ -104,9 +131,15 @@ public final class Ast
      * @param params 顶层 {@code param}，按声明顺序求值
      * @param cast   {@code on cast} 体（可为空）
      * @param tick   {@code on tick} 体（可为空 = 静止云）
+     * @param hit    {@code on hit} 体（可为空 = 撞了也不通知脚本）
+     * @param touch  {@code on touch} 体（可为空 = 碰到生物也不通知脚本）
+     * @param expire {@code on expire} 体（可为空 = 寿终直接消失）
+     * @param events 自定义事件（{@code on 名字(形参) { ... }}），按声明顺序；{@code call} 触发
      * @param nodes  节点总数（预算检查用）
      */
-    public record Program(Map<String, Expr> params, List<Stmt> cast, List<Stmt> tick, int nodes)
+    public record Program(Map<String, Expr> params, List<Stmt> cast, List<Stmt> tick,
+                          List<Stmt> hit, List<Stmt> touch, List<Stmt> expire,
+                          Map<String, Event> events, int nodes)
     {
     }
 }

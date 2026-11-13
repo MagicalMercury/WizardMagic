@@ -7,7 +7,7 @@ on cast {
         count: 1800
         life: 3.5
         shape: cone { radius: 1.2, height: 3.0 }
-        at: here()
+        at: aim(6)
     }
 }
 

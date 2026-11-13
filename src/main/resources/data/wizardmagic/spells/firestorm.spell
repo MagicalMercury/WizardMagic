@@ -5,12 +5,12 @@
 on cast {
     emit {
         element: fire
-        count: 3000
-        life: 12
-        shape: helix { radius: 2.6, thickness: 0.35, height: 8, turns: 1.2,
+        count: 8192
+        life: 240
+        shape: helix { radius: 4.8, thickness: 0.35, height: 12, turns: 1.2,
                        length: 1.2, amplitude: 2.2, frequency: 1.0,
                        radiusPulse: 0.18, radiusWave: 2.0, radiusSpeed: 2.5 }
-        at: here()
+        at: aim(6)
     }
 }
 
@@ -53,4 +53,8 @@ on tick(dt) {
 
         p.pos = p.pos + p.v * dt
     }
+}
+
+on touch {
+    hurt(0, 2.0)
 }

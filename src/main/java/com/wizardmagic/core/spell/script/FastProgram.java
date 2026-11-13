@@ -46,12 +46,19 @@ final class FastProgram
         NUM, BOOL, VEC3, ELEM, PARTICLE, VOID
     }
 
-    /** 无法安全编译的写法：退回树遍历 */
+    /**
+     * 无法安全编译的写法：退回树遍历。
+     *
+     * <p>带<b>人话原因</b>：以前这里没有 message，作者只看到"这朵云退回解释器"，
+     * 不知道是哪一行、哪种写法让它掉的。原因经 {@link SpellScript#fastPathReason()}
+     * 传到生成日志与 {@code /spell debug scripts}。</p>
+     */
     private static final class Unsupported extends RuntimeException
     {
-        Unsupported()
+        Unsupported(String reason)
         {
-            super("unsupported");
+            // 关掉栈记录：这是"预期内的拒绝"，不是异常路径
+            super(reason, null, false, false);
         }
     }
 
@@ -75,6 +82,8 @@ final class FastProgram
     private static final class Loop
     {
         int[] code;
+        /** 每条指令的源码位置（{@code line<<12|col}），运行期报错定位用 */
+        int[] pos;
         double[] consts;
         int frameSize;
         /** 自由变量：名字、槽位、类型；每步从 Env 读一次 */
@@ -83,6 +92,10 @@ final class FastProgram
         /** 每步算一次、逐粒子复用的表达式（循环体内与粒子无关的 let） */
         final List<Hoist> hoists = new ArrayList<>();
         int hoistSlots;
+        /** 顶层 if 守门量所在的 {@code hv} 槽；-1 = 这个循环没有守卫 */
+        int guardSlot = -1;
+        /** true = 循环在 {@code else} 分支里（条件为假时才跑） */
+        boolean guardNegate;
     }
 
     private static final class Free
@@ -90,6 +103,8 @@ final class FastProgram
         final String name;
         final T type;
         int offset;
+        /** true = 循环体里给这个变量赋过值（整段跑完后要搬回 Env 并落盘到云上） */
+        boolean written;
 
         Free(String name, T type)
         {
@@ -101,19 +116,30 @@ final class FastProgram
     /** 循环体内与粒子无关的 let：每步求值一次，粒子循环只读 */
     private static final class Hoist
     {
+        /** 循环体里的 {@code let} */
+        static final int KIND_LET = 0;
+        /** 顶层 {@code if} 的守门条件：每步算一次，进循环前判一次 */
+        static final int KIND_GUARD = 1;
+
         int slot;
         Ast.Expr expr;
         T type;
         /** 在循环体里是第几个 {@code let}（按语句顺序编号）；读盘时靠它重新挂到语法树上 */
         int ordinal;
+        int kind = KIND_LET;
+        /** 守门条件在"顶层可守门的 if"里的序号；只有 {@link #KIND_GUARD} 用 */
+        int guardOrdinal = -1;
     }
 
     /** 一步的准备工作：搬好的自由变量 + 算好的外提量 */
     private static final class Prepared
     {
         int[] code;
+        /** 和 {@code code} 一一对应的源码位置 */
+        int[] pos;
         double[] consts;
-        double[] frame;
+        /** 寄存器帧大小；帧本身每次 runStep 新建（可能被多个线程同时跑） */
+        int frameSize;
         double[] fv;
         double[] hv;
     }
@@ -126,72 +152,316 @@ final class FastProgram
      * <p><b>动 {@link RegVm} 的指令编码、寄存器分配规则，或 {@link #collectLets} 的编号顺序时
      * 必须 +1</b>：存档里的 {@code .spellc} 只认这个号，不认"长得差不多"。</p>
      */
-    static final int IR_VERSION = 1;
+    static final int IR_VERSION = 6;
 
     /** 类型序号会写进字节码缓存，<b>别重排这个枚举</b> */
     private static final T[] TYPES = T.values();
 
     private final List<Object> segments = new ArrayList<>();
     private final int loopCount;
+    /** 能不能按粒子区间切段并行（{@code rand()} 会把它压成 false，见 {@link #parallelSafe()}） */
+    private final boolean parallelSafe;
+    /** 最近一次运行期准备失败的原因；成功时为 null */
+    private volatile String prepareReason;
 
     // ---------------------------------------------------------------- 编译入口
 
+    /** 编译结果：要么有程序，要么有「为什么编不出来」 */
+    static final class Result
+    {
+        /** 编好的程序；null = 不支持快速路径，看 {@link #reason} */
+        final FastProgram program;
+        /** 退化原因（人话）；编译成功时为 null */
+        final String reason;
+
+        private Result(FastProgram program, String reason)
+        {
+            this.program = program;
+            this.reason = reason;
+        }
+    }
+
     static FastProgram compile(Ast.Program program, Map<String, Value> vars)
+    {
+        return compileChecked(program, vars).program;
+    }
+
+    /**
+     * 编译，失败时把原因带出来。
+     *
+     * @return {@code program == null} 时 {@code reason} 说明是哪条写法不支持快速路径
+     */
+    static Result compileChecked(Ast.Program program, Map<String, Value> vars)
     {
         try
         {
-            return fromAst(program, vars);
+            return new Result(fromAst(program, vars), null);
         }
         catch (Unsupported unsupported)
         {
+            String reason = unsupported.getMessage();
+            if (reason == null || reason.isEmpty())
+            {
+                reason = "不支持快速路径";
+            }
             if (System.getProperty("wizardmagic.script.debug") != null)
             {
-                unsupported.printStackTrace();
+                System.err.println("[script] 快速路径不支持：" + reason);
             }
-            return null;
+            return new Result(null, reason);
         }
+    }
+
+    /**
+     * 表达式里有没有 {@code rand()}（含嵌套）。
+     *
+     * <p>它是唯一<b>有状态</b>的内建：序列按执行顺序消耗。所以它只能出现在粒子循环体里
+     * （那里编译成 {@code OP_RAND}，序列跟着指令走）；写在顶层标量或守卫条件里就得由解释器
+     * 用<b>另一个</b> Interpreter 实例算，序号从 0 重新开始，和"整段都在解释器里跑"对不上。</p>
+     */
+    /** 一段语句里（递归）有没有 {@code call 事件()} */
+    private static boolean containsCall(List<Ast.Stmt> body)
+    {
+        for (Ast.Stmt s : body)
+        {
+            if (s instanceof Ast.CallEvent)
+            {
+                return true;
+            }
+            if (s instanceof Ast.If branch)
+            {
+                if (containsCall(branch.then()) || containsCall(branch.otherwise()))
+                {
+                    return true;
+                }
+            }
+            else if (s instanceof Ast.ForParticles loop && containsCall(loop.body()))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsRand(Ast.Expr e)
+    {
+        if (e instanceof Ast.Call c)
+        {            if (c.fn().equals("rand"))
+            {
+                return true;
+            }
+            for (Ast.Expr a : c.args())
+            {
+                if (containsRand(a))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (e instanceof Ast.Member m)
+        {
+            return containsRand(m.base());
+        }
+        if (e instanceof Ast.Unary u)
+        {
+            return containsRand(u.e());
+        }
+        if (e instanceof Ast.Binary b)
+        {
+            return containsRand(b.a()) || containsRand(b.b());
+        }
+        if (e instanceof Ast.RecordLit r)
+        {
+            for (Ast.Expr v : r.fields().values())
+            {
+                if (containsRand(v))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    /** 这条顶层标量语句里有没有 {@code rand()} */    private static boolean stmtHasRand(Ast.Stmt s)
+    {
+        if (s instanceof Ast.Let l)
+        {
+            return containsRand(l.value());
+        }
+        if (s instanceof Ast.Assign a)
+        {
+            return containsRand(a.value());
+        }
+        if (s instanceof Ast.ExprStmt es)
+        {
+            return containsRand(es.expr());
+        }
+        return false;
     }
 
     private static FastProgram fromAst(Ast.Program program, Map<String, Value> vars)
     {
         Scope top = new Scope(null, globalsOf(vars));
+        java.util.Set<String> writable = vars == null ? java.util.Set.of() : vars.keySet();
         List<Object> segments = new ArrayList<>();
         boolean sawLoop = false;
         int loops = 0;
+        int guardOrdinal = 0;
+        // call 出现在 tick 的任何位置（含顶层 if 里、循环体里）都不能编：
+        // 事件体是解释器跑的一整段代码，寄存器机没法中途跳出去跑一段再回来。
+        if (containsCall(program.tick()))
+        {
+            throw new Unsupported("on tick 里用了 call（自定义事件由解释器执行，"
+                    + "把 call 挪到 on hit / on expire 里就不会掉快速路径）");
+        }
         for (Ast.Stmt s : program.tick())
         {
             if (s instanceof Ast.ForParticles loop)
             {
-                segments.add(buildLoop(loop, top));
+                segments.add(buildLoop(loop, top, writable));
                 sawLoop = true;
                 loops++;
+            }
+            else if (s instanceof Ast.If branch)
+            {
+                // 顶层 if：展开成"带守卫的循环"。条件每步只算一次（进 hv），
+                // 循环开头判一下——这样"时间/阶段到了才进循环"也能编译。
+                List<Guarded> plan = guardPlan(branch);
+                if (plan == null)
+                {
+                    throw new Unsupported("on tick 顶层的 if 里要有粒子循环（"
+                            + "if (cond) { for p in particles { ... } }）");
+                }
+                if (typeOf(branch.cond(), top) != T.BOOL)
+                {
+                    throw new Unsupported("顶层 if 的条件必须是 bool");
+                }
+                if (containsRand(branch.cond()))
+                {
+                    throw new Unsupported("rand() 只能写在粒子循环里（守卫条件每步只算一次，"
+                            + "序列和解释器对不上）");
+                }
+                if (!independent(branch.cond(), top))
+                {
+                    throw new Unsupported("顶层 if 的条件必须与粒子无关");
+                }
+                for (Guarded g : plan)
+                {
+                    segments.add(buildLoop(g.loop(), top, branch.cond(), guardOrdinal, g.negate(), writable));
+                    loops++;
+                }
+                sawLoop = true;
+                guardOrdinal++;
             }
             else if (s instanceof Ast.Let || s instanceof Ast.Assign || s instanceof Ast.ExprStmt)
             {
                 if (sawLoop)
                 {
                     // 粒子循环之后还有标量语句：为了能"先校验后执行"，这里不支持
-                    throw new Unsupported();
+                    throw new Unsupported("粒子循环之后还有标量语句（快速路径要「先校验后执行」）");
+                }
+                if (stmtHasRand(s))
+                {
+                    throw new Unsupported("rand() 只能写在粒子循环里（循环外它由另一个解释器"
+                            + "实例求值，随机序列和整段解释执行对不上）");
                 }
                 inferStmt(s, top);
                 segments.add(new Scalar(s));
             }
+            else if (s instanceof Ast.Emit)
+            {
+                // tick 里的 emit 目前只能在解释器里跑：生成子云要等整步结束（服务端管理器处理），
+                // 而寄存器机是"每粒一段"跑完就完事，塞不进这个时机。
+                throw new Unsupported("on tick 里的 emit 目前只能用解释器（子云要等整步结束后生成）");
+            }
+            else if (s instanceof Ast.CallEvent)
+            {
+                // 自定义事件的体是解释器跑的一整段代码，寄存器机没法在中间"跳进去跑一段"。
+                // 想保留快速路径就把 call 挪到 on hit / on expire 里（那两个阶段本来就解释执行）。
+                throw new Unsupported("on tick 里用了 call（自定义事件由解释器执行，"
+                        + "把 call 挪到 on hit / on expire 里就不会掉快速路径）");
+            }
             else
             {
-                throw new Unsupported();
+                throw new Unsupported("on tick 顶层只支持 let / 赋值 / 表达式 / for p in particles / if / emit");
             }
         }
         if (segments.isEmpty())
         {
-            throw new Unsupported();
+            throw new Unsupported("on tick 里没有粒子循环");
+        }        // 写云级变量：值先落在 fv 里、整段跑完才搬回 Env。多条循环会各自持有快照，
+        // 第二段读不到第一段写进去的值（解释器里是立刻可见的），所以只支持单循环。
+        if (loops > 1)
+        {
+            for (Object seg : segments)
+            {
+                if (seg instanceof Loop L && writesCloudVar(L))
+                {
+                    throw new Unsupported("写云级变量目前只支持单个粒子循环");
+                }
+            }
         }
         return new FastProgram(segments, loops);
+    }
+
+    /** 这个循环体写过云级变量吗 */
+    private static boolean writesCloudVar(Loop L)
+    {
+        for (Free f : L.frees)
+        {
+            if (f.written)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private FastProgram(List<Object> segments, int loopCount)
     {
         this.segments.addAll(segments);
         this.loopCount = loopCount;
+        boolean safe = true;
+        for (Object seg : this.segments)
+        {
+            if (seg instanceof Loop L && L.code != null)
+            {
+                if (!rangeSafe(L.code) || writesCloudVar(L))
+                {
+                    // rand() 的序列、云级变量的写回都依赖"按粒子顺序整段执行"
+                    safe = false;
+                }
+            }
+        }
+        this.parallelSafe = safe;
+    }
+
+    /**
+     * 这段指令能不能按粒子区间切段并行。
+     *
+     * <p>{@code rand()} 的序列是"按粒子顺序"消耗的（第 0 粒的几次、第 1 粒的几次……），
+     * 切段之后每个工作线程的起点不同，序列就变了。所以带 {@code OP_RAND} 的循环体整朵云
+     * 只能一次跑完——{@link SpellCloud#beginStep()} 会看到 {@link #parallelSafe()} 为假，
+     * 直接把整段跑掉、不进并行池。</p>
+     */
+    boolean parallelSafe()
+    {
+        return parallelSafe;
+    }
+
+    private static boolean rangeSafe(int[] code)
+    {
+        for (int w : code)
+        {
+            if ((w >>> 24) == RegVm.OP_RAND)
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static Map<String, T> globalsOf(Map<String, Value> vars)
@@ -258,26 +528,98 @@ final class FastProgram
             {
                 out.writeInt(w);
             }
+            // 指令的位置表（运行期报错的行列）；长度必须和指令流一致
+            out.writeInt(L.pos.length);
+            for (int x : L.pos)
+            {
+                out.writeInt(x);
+            }
             out.writeInt(L.frees.size());
             for (Free f : L.frees)
             {
                 out.writeUTF(f.name);
                 out.writeByte(f.type.ordinal());
                 out.writeInt(f.offset);
+                out.writeBoolean(f.written);
             }
             out.writeInt(L.hoists.size());
             for (Hoist h : L.hoists)
             {
-                if (h.ordinal < 0)
+                // kind + 编号（let 的序号 / 守门条件在所有可守门 if 里的序号）
+                out.writeByte(h.kind);
+                if (h.kind == Hoist.KIND_GUARD)
                 {
-                    // 没有编号 = 读回时挂不回语法树，这份程序不能落盘
-                    throw new IOException("外提量缺少编号");
+                    if (h.guardOrdinal < 0)
+                    {
+                        throw new IOException("守门条件缺少编号");
+                    }
+                    out.writeInt(h.guardOrdinal);
                 }
-                out.writeInt(h.ordinal);
+                else
+                {
+                    if (h.ordinal < 0)
+                    {
+                        // 没有编号 = 读回时挂不回语法树，这份程序不能落盘
+                        throw new IOException("外提量缺少编号");
+                    }
+                    out.writeInt(h.ordinal);
+                }
                 out.writeInt(h.slot);
                 out.writeByte(h.type.ordinal());
             }
         }
+    }
+
+    /**
+     * 读盘用：把 {@code on tick} 展平成"循环 / 标量"清单，和 {@link #fromAst} 同一个走法。
+     *
+     * <p>顶层 {@code if} 会被展成带守卫的循环（见 {@link #guardPlan}），所以缓存里存的是
+     * "每个循环 + 它的守门条件序号"，读回时必须按同一顺序重建。</p>
+     */
+    private record Plan(Object node, boolean negate, int guardOrdinal)
+    {
+    }
+
+    private static List<Plan> plan(List<Ast.Stmt> tick)
+    {
+        List<Plan> out = new ArrayList<>();
+        boolean sawLoop = false;
+        int guardOrdinal = 0;
+        for (Ast.Stmt s : tick)
+        {
+            if (s instanceof Ast.ForParticles loop)
+            {
+                out.add(new Plan(loop, false, -1));
+                sawLoop = true;
+            }
+            else if (s instanceof Ast.If branch)
+            {
+                List<Guarded> gs = guardPlan(branch);
+                if (gs == null)
+                {
+                    return null;
+                }
+                for (Guarded g : gs)
+                {
+                    out.add(new Plan(g.loop(), g.negate(), guardOrdinal));
+                }
+                sawLoop = true;
+                guardOrdinal++;
+            }
+            else if (s instanceof Ast.Let || s instanceof Ast.Assign || s instanceof Ast.ExprStmt)
+            {
+                if (sawLoop)
+                {
+                    return null;
+                }
+                out.add(new Plan(s, false, -1));
+            }
+            else
+            {
+                return null;
+            }
+        }
+        return out;
     }
 
     /**
@@ -289,39 +631,32 @@ final class FastProgram
     {
         try
         {
-            int loopCount = in.readInt();
-            List<Ast.ForParticles> loops = new ArrayList<>();
-            boolean sawLoop = false;
-            for (Ast.Stmt s : program.tick())
-            {
-                if (s instanceof Ast.ForParticles loop)
-                {
-                    loops.add(loop);
-                    sawLoop = true;
-                }
-                else if (s instanceof Ast.Let || s instanceof Ast.Assign || s instanceof Ast.ExprStmt)
-                {
-                    if (sawLoop)
-                    {
-                        return null;
-                    }
-                }
-                else
-                {
-                    return null;
-                }
-            }
-            if (loops.size() != loopCount || loops.isEmpty())
+            List<Plan> plans = plan(program.tick());
+            if (plans == null)
             {
                 return null;
             }
+            int loopCount = in.readInt();
+            int loops = 0;
+            for (Plan p : plans)
+            {
+                if (p.node() instanceof Ast.ForParticles)
+                {
+                    loops++;
+                }
+            }
+            if (loops != loopCount || loops == 0)
+            {
+                return null;
+            }
+            List<Ast.Expr> guards = guardConditions(program.tick());
 
             List<Object> segments = new ArrayList<>();
-            for (Ast.Stmt s : program.tick())
+            for (Plan p : plans)
             {
-                if (s instanceof Ast.ForParticles loop)
+                if (p.node() instanceof Ast.ForParticles loop)
                 {
-                    Loop L = readLoop(in, loop);
+                    Loop L = readLoop(in, loop, guards, p.negate());
                     if (L == null)
                     {
                         return null;
@@ -330,7 +665,7 @@ final class FastProgram
                 }
                 else
                 {
-                    segments.add(new Scalar(s));
+                    segments.add(new Scalar((Ast.Stmt) p.node()));
                 }
             }
             return new FastProgram(segments, loopCount);
@@ -341,7 +676,8 @@ final class FastProgram
         }
     }
 
-    private static Loop readLoop(DataInputStream in, Ast.ForParticles loop) throws IOException
+    private static Loop readLoop(DataInputStream in, Ast.ForParticles loop,
+                                 List<Ast.Expr> guards, boolean negate) throws IOException
     {
         Loop L = new Loop();
         L.frameSize = in.readInt();
@@ -372,6 +708,17 @@ final class FastProgram
             L.code[i] = in.readInt();
         }
 
+        int nPos = in.readInt();
+        if (nPos != nCode)
+        {
+            return null;
+        }
+        L.pos = new int[nPos];
+        for (int i = 0; i < nPos; i++)
+        {
+            L.pos[i] = in.readInt();
+        }
+
         int nFree = in.readInt();
         if (nFree < 0 || nFree > MAX_REGS)
         {
@@ -382,6 +729,7 @@ final class FastProgram
             String name = in.readUTF();
             int typeId = in.readByte();
             int off = in.readInt();
+            boolean written = in.readBoolean();
             if (typeId < 0 || typeId >= TYPES.length || off < 0 || off >= L.frameSize)
             {
                 return null;
@@ -389,6 +737,7 @@ final class FastProgram
             T type = TYPES[typeId];
             Free f = new Free(name, type);
             f.offset = off;
+            f.written = written;
             L.frees.add(f);
             L.freeSlots = Math.max(L.freeSlots, off + width(type));
         }
@@ -401,19 +750,43 @@ final class FastProgram
         List<Ast.Let> lets = collectLets(loop.body());
         for (int i = 0; i < nHoist; i++)
         {
-            int ordinal = in.readInt();
+            int kind = in.readByte();
+            int id = in.readInt();
             int slot = in.readInt();
             int typeId = in.readByte();
-            if (typeId < 0 || typeId >= TYPES.length || ordinal < 0 || ordinal >= lets.size())
+            if (typeId < 0 || typeId >= TYPES.length || slot < 0 || slot >= MAX_REGS)
             {
                 return null;
             }
             T type = TYPES[typeId];
             Hoist h = new Hoist();
-            h.ordinal = ordinal;
+            h.kind = kind;
             h.slot = slot;
             h.type = type;
-            h.expr = lets.get(ordinal).value();
+            if (kind == Hoist.KIND_GUARD)
+            {
+                if (id < 0 || id >= guards.size() || type != T.BOOL)
+                {
+                    return null;
+                }
+                h.guardOrdinal = id;
+                h.expr = guards.get(id);
+                L.guardSlot = slot;
+                L.guardNegate = negate;
+            }
+            else if (kind == Hoist.KIND_LET)
+            {
+                if (id < 0 || id >= lets.size())
+                {
+                    return null;
+                }
+                h.ordinal = id;
+                h.expr = lets.get(id).value();
+            }
+            else
+            {
+                return null;
+            }
             L.hoists.add(h);
             L.hoistSlots = Math.max(L.hoistSlots, slot + width(type));
         }
@@ -451,6 +824,39 @@ final class FastProgram
      */
     boolean tick(SpellCloud cloud)
     {
+        Step step = prepareStep(cloud);
+        if (step == null)
+        {
+            return false;
+        }
+        runStep(step, cloud, 0, cloud.count);
+        completeStep(step, cloud);
+        return true;
+    }
+
+    /**
+     * 一步的「准备」：跑标量段、搬自由变量、算外提量。**必须在调用线程上做一次**，
+     * 之后才能把任意粒子区间丢给工作线程。
+     *
+     * @return null = 这朵云不支持快速路径（此时粒子还没被动过，退回解释器是干净的）
+     */
+    static final class Step
+    {
+        private final Prepared[] prepared;
+        private final double time;
+        private final Env root;
+
+        Step(Prepared[] prepared, double time, Env root)
+        {
+            this.prepared = prepared;
+            this.time = time;
+            this.root = root;
+        }
+    }
+
+    Step prepareStep(SpellCloud cloud)
+    {
+        prepareReason = null;
         Env root;
         try
         {
@@ -458,7 +864,8 @@ final class FastProgram
         }
         catch (RuntimeException e)
         {
-            return false;
+            prepareReason = "运行期环境准备失败：" + e.getMessage();
+            return null;
         }
 
         // 先跑标量段（只改 Env，不碰云）
@@ -478,45 +885,94 @@ final class FastProgram
         {
             if (seg instanceof Loop L)
             {
-                Prepared p = prepare(L, cloud, root);
+                String[] why = new String[1];
+                Prepared p = prepare(L, cloud, root, why);
                 if (p == null)
                 {
-                    return false;
+                    prepareReason = why[0] == null ? "运行期准备失败" : why[0];
+                    return null;
                 }
                 prepared[li++] = p;
             }
         }
+        return new Step(prepared, cloud.ageSteps() * SpellConstants.DT, root);
+    }
 
-        double time = cloud.ageSteps() * SpellConstants.DT;
-        int count = cloud.count;
-        li = 0;
+    /** 最近一次 {@link #prepareStep} 失败的原因（人话）；成功时为 null */
+    String prepareReason()
+    {
+        return prepareReason;
+    }
+
+    /** 跑 {@code [from, to)}；可以在任意线程上并发调用（寄存器帧每次新建） */
+    void runStep(Step step, SpellCloud cloud, int from, int to)
+    {
+        int li = 0;
+        // 同一步里可能有多个循环：rand() 的序列要接着上一条往下数（与解释器一致）
+        int randSeq = 0;
         for (Object seg : segments)
         {
             if (seg instanceof Loop)
             {
-                Prepared p = prepared[li++];
-                RegVm.execute(p.code, p.consts, p.frame, p.fv, p.hv, cloud, count, time);
+                Prepared p = step.prepared[li++];
+                randSeq = RegVm.execute(p.code, p.pos, p.consts, new double[p.frameSize], p.fv, p.hv,
+                        cloud, from, to, step.time, randSeq);
             }
         }
-        Interpreter.saveRoot(cloud, root);
-        return true;
+    }
+
+    /** 收尾：把写过的云级变量搬回 Env，再统一写回云上 */
+    void completeStep(Step step, SpellCloud cloud)
+    {
+        int li = 0;
+        for (Object seg : segments)
+        {
+            if (seg instanceof Loop L)
+            {
+                Prepared p = step.prepared[li++];
+                for (Free f : L.frees)
+                {
+                    if (f.written)
+                    {
+                        step.root.define(f.name, valueOf(p.fv, f));
+                    }
+                }
+            }
+        }
+        Interpreter.saveRoot(cloud, step.root);
+    }
+
+    /** 从 fv 里取出一个自由变量的值 */
+    private static Value valueOf(double[] fv, Free f)
+    {
+        if (f.type == T.BOOL)
+        {
+            return fv[f.offset] != 0.0 ? Value.TRUE : Value.FALSE;
+        }
+        if (f.type == T.VEC3)
+        {
+            return Value.vec(fv[f.offset], fv[f.offset + 1], fv[f.offset + 2]);
+        }
+        return Value.num(fv[f.offset]);
     }
 
     /**
-     * 冷路径：校验并搬自由变量、算外提量。失败返回 null（调用方退回解释器）。
+     * 冷路径：校验并搬自由变量、算外提量。失败返回 null（调用方退回解释器）并写明原因。
      */
-    private static Prepared prepare(Loop L, SpellCloud cloud, Env root)
+    private static Prepared prepare(Loop L, SpellCloud cloud, Env root, String[] why)
     {
         Prepared p = new Prepared();
         p.code = L.code;
+        p.pos = L.pos;
         p.consts = L.consts;
-        p.frame = new double[L.frameSize];
+        p.frameSize = L.frameSize;
 
         p.fv = new double[L.freeSlots];
         for (Free f : L.frees)
         {
             if (!store(p.fv, f, root.get(f.name)))
             {
+                why[0] = "自由变量 " + f.name + " 运行期的类型搬不动（bool / element）";
                 return null;
             }
         }
@@ -531,20 +987,33 @@ final class FastProgram
             }
             catch (RuntimeException e)
             {
+                why[0] = "外提量求值失败：" + e.getMessage();
                 return null;
             }
             if (h.type == T.NUM)
             {
                 if (!(v instanceof Value.Num n))
                 {
+                    why[0] = "外提量运行期不是 num";
                     return null;
                 }
                 p.hv[h.slot] = n.v();
+            }
+            else if (h.type == T.BOOL)
+            {
+                // 守门量（顶层 if 的条件）：进 hv 的时候按 0/1 存
+                if (!(v instanceof Value.Bool b))
+                {
+                    why[0] = "守门条件运行期不是 bool";
+                    return null;
+                }
+                p.hv[h.slot] = b.v() ? 1.0 : 0.0;
             }
             else
             {
                 if (!(v instanceof Value.Vec3 x))
                 {
+                    why[0] = "外提量运行期不是 vec3";
                     return null;
                 }
                 p.hv[h.slot] = x.x();
@@ -566,6 +1035,15 @@ final class FastProgram
             fv[f.offset] = n.v();
             return true;
         }
+        if (f.type == T.BOOL)
+        {
+            if (!(v instanceof Value.Bool b))
+            {
+                return false;
+            }
+            fv[f.offset] = b.v() ? 1.0 : 0.0;
+            return true;
+        }
         if (f.type == T.VEC3)
         {
             if (!(v instanceof Value.Vec3 x))
@@ -582,11 +1060,102 @@ final class FastProgram
 
     // ---------------------------------------------------------------- 生成
 
-    private static Loop buildLoop(Ast.ForParticles loop, Scope top)
+    private static Loop buildLoop(Ast.ForParticles loop, Scope top, java.util.Set<String> writable)
+    {
+        return buildLoop(loop, top, null, -1, false, writable);
+    }
+
+    /**
+     * 编一个粒子循环；{@code guard != null} 时先在循环开头判一次守门条件。
+     *
+     * <p>守门量自己占一个 {@code hv} 槽，<b>必须在编循环体之前占</b>——循环体里的外提量
+     * 是按 {@code hoistSlots} 递增分槽的，晚占就会撞槽。</p>
+     */
+    private static Loop buildLoop(Ast.ForParticles loop, Scope top, Ast.Expr guard,
+                                  int guardOrdinal, boolean negate, java.util.Set<String> writable)
     {
         Loop L = new Loop();
-        new Codegen(L, top).compileBody(loop.body(), loop.var());
+        if (guard != null)
+        {
+            Hoist g = new Hoist();
+            g.expr = guard;
+            g.type = T.BOOL;
+            g.kind = Hoist.KIND_GUARD;
+            g.guardOrdinal = guardOrdinal;
+            g.slot = L.hoistSlots;
+            L.hoistSlots += 1;
+            L.hoists.add(g);
+            L.guardSlot = g.slot;
+            L.guardNegate = negate;
+        }
+        new Codegen(L, top, writable).compileBody(loop.body(), loop.var());
         return L;
+    }
+
+    /**
+     * 顶层 {@code if} 展开成"带守卫的循环"清单。
+     *
+     * <p>支持三种形状：</p>
+     * <pre>
+     * if (c) { for p in particles { ... } }
+     * if (c) { for p ... } else { for p ... }
+     * if (c) { } else { for p ... }
+     * </pre>
+     *
+     * <p>别的一律返回 {@code null}（退回解释器）：宁可慢，也不要猜语义。</p>
+     */
+    private static List<Guarded> guardPlan(Ast.If branch)
+    {
+        Ast.ForParticles then = singleLoop(branch.then());
+        Ast.ForParticles other = singleLoop(branch.otherwise());
+        if (then != null)
+        {
+            List<Guarded> out = new ArrayList<>(2);
+            out.add(new Guarded(then, false));
+            if (other != null)
+            {
+                out.add(new Guarded(other, true));
+            }
+            else if (!branch.otherwise().isEmpty())
+            {
+                return null;
+            }
+            return out;
+        }
+        if (branch.then().isEmpty() && other != null)
+        {
+            return List.of(new Guarded(other, true));
+        }
+        return null;
+    }
+
+    /** 一条"带守卫的粒子循环"：循环体 + 条件为假时才跑 */
+    private record Guarded(Ast.ForParticles loop, boolean negate)
+    {
+    }
+
+    /** 语句序列是不是"正好一条粒子循环" */
+    private static Ast.ForParticles singleLoop(List<Ast.Stmt> body)
+    {
+        return body.size() == 1 && body.get(0) instanceof Ast.ForParticles loop ? loop : null;
+    }
+
+    /**
+     * 顶层所有"可守门 if"的条件，按出现顺序。
+     *
+     * <p>编译与读盘走同一个走法：守门量的序号就是它在这个列表里的下标。</p>
+     */
+    private static List<Ast.Expr> guardConditions(List<Ast.Stmt> tick)
+    {
+        List<Ast.Expr> out = new ArrayList<>();
+        for (Ast.Stmt s : tick)
+        {
+            if (s instanceof Ast.If branch && guardPlan(branch) != null)
+            {
+                out.add(branch.cond());
+            }
+        }
+        return out;
     }
 
     private static void inferStmt(Ast.Stmt s, Scope sc)
@@ -604,7 +1173,7 @@ final class FastProgram
                 T cur = sc.type(assign.base());
                 if (cur != null && cur != t)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("顶层变量改类型");
                 }
             }
         }
@@ -624,6 +1193,11 @@ final class FastProgram
         {
             return T.BOOL;
         }
+        if (e instanceof Ast.StrLit)
+        {
+            // 字符串只出现在事件体里（hit.block 的比较），寄存器机根本不跑那些代码
+            throw new Unsupported("字符串只能用在 on hit / on expire 里（快速路径里没有字符串）");
+        }
         if (e instanceof Ast.Var v)
         {
             T t = sc.type(v.name());
@@ -635,7 +1209,7 @@ final class FastProgram
             {
                 return T.ELEM;
             }
-            throw new Unsupported();
+            throw new Unsupported("变量没有可推断的类型");
         }
         if (e instanceof Ast.Member m)
         {
@@ -646,13 +1220,13 @@ final class FastProgram
                 {
                     return T.NUM;
                 }
-                throw new Unsupported();
+                throw new Unsupported("vec3 只有 .x / .y / .z");
             }
             if (base == T.PARTICLE)
             {
                 return particlePropType(m.name());
             }
-            throw new Unsupported();
+            throw new Unsupported("这个成员访问快速路径不支持");
         }
         if (e instanceof Ast.Unary u)
         {
@@ -661,7 +1235,7 @@ final class FastProgram
             {
                 if (t != T.BOOL)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("not 只接受 bool");
                 }
                 return T.BOOL;
             }
@@ -669,7 +1243,7 @@ final class FastProgram
             {
                 return t;
             }
-            throw new Unsupported();
+            throw new Unsupported("负号只支持 num 或 vec3");
         }
         if (e instanceof Ast.Binary b)
         {
@@ -681,7 +1255,7 @@ final class FastProgram
                 case "or":
                     if (a != T.BOOL || c != T.BOOL)
                     {
-                        throw new Unsupported();
+                        throw new Unsupported("and / or 两侧必须是 bool");
                     }
                     return T.BOOL;
                 case "==":
@@ -692,7 +1266,7 @@ final class FastProgram
                 case ">=":
                     if (a != T.NUM || c != T.NUM)
                     {
-                        throw new Unsupported();
+                        throw new Unsupported("比较在快速路径里只支持 num（vec3 / element 比较会退回解释器）");
                     }
                     return T.BOOL;
                 case "+":
@@ -705,7 +1279,7 @@ final class FastProgram
                     {
                         return T.VEC3;
                     }
-                    throw new Unsupported();
+                    throw new Unsupported("+ / - 只支持 num+num 或 vec3+vec3");
                 case "*":
                     if (a == T.NUM && c == T.NUM)
                     {
@@ -719,7 +1293,7 @@ final class FastProgram
                     {
                         return T.VEC3;
                     }
-                    throw new Unsupported();
+                    throw new Unsupported("* 只支持 num*num、vec3*num、num*vec3");
                 case "/":
                     if (a == T.NUM && c == T.NUM)
                     {
@@ -729,16 +1303,22 @@ final class FastProgram
                     {
                         return T.VEC3;
                     }
-                    throw new Unsupported();
+                    throw new Unsupported("/ 只支持 num/num 或 vec3/num");
+                case "%":
+                    if (a == T.NUM && c == T.NUM)
+                    {
+                        return T.NUM;
+                    }
+                    throw new Unsupported("% 只支持 num % num");
                 default:
-                    throw new Unsupported();
+                    throw new Unsupported("未知运算符");
             }
         }
         if (e instanceof Ast.Call c)
         {
             return callType(c, sc);
         }
-        throw new Unsupported();
+        throw new Unsupported("这个表达式快速路径不支持");
     }
 
     private static T callType(Ast.Call c, Scope sc)
@@ -749,6 +1329,7 @@ final class FastProgram
         {
             case "abs":
             case "sqrt":
+            case "sign":
             case "sin":
             case "cos":
             case "exp":
@@ -757,8 +1338,14 @@ final class FastProgram
                 need(args, 1);
                 needNum(args.get(0), sc);
                 return T.NUM;
+            case "rand":
+                // 序列是按粒子顺序消耗的，所以带它的循环体不能切段（见 parallelSafe()）
+                need(args, 0);
+                return T.NUM;
             case "min":
             case "max":
+            case "pow":
+            case "atan2":
                 need(args, 2);
                 needNum(args.get(0), sc);
                 needNum(args.get(1), sc);
@@ -784,7 +1371,7 @@ final class FastProgram
                 {
                     return T.VEC3;
                 }
-                throw new Unsupported();
+                throw new Unsupported("lerp 只支持 num 或 vec3");
             }
             case "vec":
                 need(args, 3);
@@ -818,9 +1405,21 @@ final class FastProgram
                 return T.NUM;
             case "tangent":
             case "radial":
-                need(args, 2);
+                // 2 参绕世界 Y，3 参绕任意轴
+                if (args.size() != 2 && args.size() != 3)
+                {
+                    throw new Unsupported("tangent / radial 需要 2 或 3 个参数");
+                }
+                for (Ast.Expr a : args)
+                {
+                    needVec(a, sc);
+                }
+                return T.VEC3;
+            case "rotate":
+                need(args, 3);
                 needVec(args.get(0), sc);
                 needVec(args.get(1), sc);
+                needNum(args.get(2), sc);
                 return T.VEC3;
             case "noise":
                 need(args, 4);
@@ -834,11 +1433,11 @@ final class FastProgram
                 need(args, 1);
                 if (typeOf(args.get(0), sc) != T.ELEM || !isElementLiteral(args.get(0), sc))
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("gravity() / volatility() 的参数必须是元素字面量，例如 gravity(fire)");
                 }
                 return T.NUM;
             default:
-                throw new Unsupported();
+                throw new Unsupported("快速路径不支持这个函数");
         }
     }
 
@@ -846,7 +1445,7 @@ final class FastProgram
     {
         if (args.size() != n)
         {
-            throw new Unsupported();
+            throw new Unsupported("内建函数的实参个数不对");
         }
     }
 
@@ -854,7 +1453,7 @@ final class FastProgram
     {
         if (typeOf(e, sc) != T.NUM)
         {
-            throw new Unsupported();
+            throw new Unsupported("这里需要 num");
         }
     }
 
@@ -862,7 +1461,7 @@ final class FastProgram
     {
         if (typeOf(e, sc) != T.VEC3)
         {
-            throw new Unsupported();
+            throw new Unsupported("这里需要 vec3");
         }
     }
 
@@ -934,7 +1533,7 @@ final class FastProgram
             case "age":
                 return T.NUM;
             default:
-                throw new Unsupported();
+                throw new Unsupported("不认识的粒子属性");
         }
     }
 
@@ -1044,6 +1643,8 @@ final class FastProgram
         private final Loop loop;
         private final Scope top;
         private final Map<String, Free> freeIndex = new HashMap<>();
+        /** cast 里声明过的变量名：只有它们可写（内置的 dt/time/… 只读） */
+        private final java.util.Set<String> writable;
         /** 循环体里每个 let 的编号（落盘后再读回时用来把外提量挂回语法树） */
         private final Map<Ast.Let, Integer> letOrdinals = new IdentityHashMap<>();
         /** 水位：下一个空闲寄存器 */
@@ -1053,10 +1654,11 @@ final class FastProgram
         /** 在 if 分支里的语句不参与外提（避免把可能抛错/不该执行的计算提前） */
         private int ifDepth;
 
-        Codegen(Loop loop, Scope top)
+        Codegen(Loop loop, Scope top, java.util.Set<String> writable)
         {
             this.loop = loop;
             this.top = top;
+            this.writable = writable == null ? java.util.Set.of() : writable;
         }
 
         void compileBody(List<Ast.Stmt> body, String varName)
@@ -1068,11 +1670,27 @@ final class FastProgram
             }
             Scope sc = new Scope(top, null);
             sc.declare(varName, T.PARTICLE, -1);
+            // 顶层 if 的守卫：每步算过一次（在 hv 里），这里每条粒子判一下再进循环体
+            int guardSkip = -1;
+            if (loop.guardSlot >= 0)
+            {
+                int r = alloc(T.BOOL);
+                emit2(OP_LDH1, r, loop.guardSlot);
+                emit2(loop.guardNegate ? OP_JNZ : OP_JZ, r, 0);
+                guardSkip = code.add(-1);
+                // 守卫寄存器用完即弃：循环体从 0 号槽重新开始分
+                nextReg = 0;
+            }
             for (Ast.Stmt s : body)
             {
                 stmt(s, sc);
             }
+            if (guardSkip >= 0)
+            {
+                code.set(guardSkip, code.size());
+            }
             loop.code = code.toArray();
+            loop.pos = code.positions();
             loop.consts = consts.toArray();
             loop.frameSize = Math.max(maxReg + 4, 16);
             if (System.getProperty("wizardmagic.script.debug") != null)
@@ -1086,6 +1704,8 @@ final class FastProgram
 
         private void stmt(Ast.Stmt s, Scope sc)
         {
+            // 之后的指令都记成这条语句的位置：运行期报错（除零等）才指得到行
+            code.at(s.line(), s.col());
             if (s instanceof Ast.Let let)
             {
                 let(let, sc);
@@ -1105,7 +1725,7 @@ final class FastProgram
             {
                 return;
             }
-            throw new Unsupported();
+            throw new Unsupported("循环体里只支持 let / 赋值 / if / 表达式");
         }
 
         private void let(Ast.Let let, Scope sc)
@@ -1113,7 +1733,7 @@ final class FastProgram
             T t = typeOf(let.value(), sc);
             if (t != T.NUM && t != T.BOOL && t != T.VEC3)
             {
-                throw new Unsupported();
+                throw new Unsupported("循环体里的 let 只能是 num / bool / vec3");
             }
             if (ifDepth == 0 && t != T.BOOL && independent(let.value(), sc))
             {
@@ -1123,7 +1743,7 @@ final class FastProgram
                 loop.hoistSlots += width(t);
                 if (loop.hoistSlots > MAX_REGS)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("外提量太多（超过 256 个槽）");
                 }
                 h.expr = let.value();
                 h.type = t;
@@ -1141,7 +1761,7 @@ final class FastProgram
         {
             if (typeOf(branch.cond(), sc) != T.BOOL)
             {
-                throw new Unsupported();
+                throw new Unsupported("if 的条件必须是 bool");
             }
             int base = nextReg;
             int cond = alloc(T.BOOL);
@@ -1192,13 +1812,47 @@ final class FastProgram
                 Integer slot = sc.slot(a.base());
                 if (slot == null)
                 {
-                    // 外提量、自由变量、元素：都不支持写
-                    throw new Unsupported();
+                    // 不是本作用域里的寄存器 → 可能是外提量（只读）、内置量（只读）、
+                    // 或者云级变量（可写：整段跑完后搬回 Env）
+                    if (sc.hoistSlot(a.base()) != null)
+                    {
+                        throw new Unsupported("不能给外提量赋值（它在循环外每步只算一次）");
+                    }
+                    T cur = sc.type(a.base());
+                    if (cur == null)
+                    {
+                        throw new Unsupported("这只变量没有可推断的类型");
+                    }
+                    if (!writable.contains(a.base()))
+                    {
+                        throw new Unsupported("不能给内置量 " + a.base()
+                                + " 赋值（只有 cast 里声明的变量可写）");
+                    }
+                    if (cur != rhs)
+                    {
+                        throw new Unsupported("变量改类型");
+                    }
+                    int mark0 = nextReg;
+                    int dst = alloc(rhs);
+                    if (a.op().isEmpty())
+                    {
+                        expr(a.value(), sc, dst);
+                    }
+                    else
+                    {
+                        emitFree(a.base(), cur, dst);
+                        int t = alloc(rhs);
+                        expr(a.value(), sc, t);
+                        binaryOp(a.op(), cur, rhs, dst, dst, t);
+                    }
+                    emitFreeStore(a.base(), cur, dst);
+                    nextReg = mark0;
+                    return;
                 }
                 T cur = sc.type(a.base());
                 if (cur != rhs)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("变量改类型");
                 }
                 if (a.op().isEmpty())
                 {
@@ -1215,11 +1869,11 @@ final class FastProgram
 
             if (!a.path().isEmpty() && !(a.base().equals("p") || sc.type(a.base()) == T.PARTICLE))
             {
-                throw new Unsupported();
+                throw new Unsupported("只能给粒子属性赋值（p.xxx）");
             }
             if (a.path().size() != 1 && a.path().size() != 2)
             {
-                throw new Unsupported();
+                throw new Unsupported("赋值路径太长");
             }
 
             int mark = nextReg;
@@ -1230,11 +1884,11 @@ final class FastProgram
                 String comp = a.path().get(1);
                 if (!(prop.equals("pos") || prop.equals("v")) || component(comp) < 0)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("粒子只有 pos / v 能逐分量赋值");
                 }
                 if (rhs != T.NUM)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("pos / v 的分量只能赋 num");
                 }
                 int dst = alloc(T.NUM);
                 if (a.op().isEmpty())
@@ -1261,7 +1915,7 @@ final class FastProgram
             {
                 if (pt != rhs)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("给粒子属性赋的值类型不对");
                 }
                 expr(a.value(), sc, dst);
             }
@@ -1277,7 +1931,7 @@ final class FastProgram
                 case "pos": emit1(OP_SPOS, dst); break;
                 case "v": emit1(OP_SVEL, dst); break;
                 case "energy": emit1(OP_SENERGY, dst); break;
-                default: throw new Unsupported();
+                default: throw new Unsupported("不认识的粒子属性");
             }
             nextReg = mark;
         }
@@ -1319,7 +1973,7 @@ final class FastProgram
                     emitFree(v.name(), t, dst);
                     return;
                 }
-                throw new Unsupported();
+                throw new Unsupported("变量不在任何作用域里");
             }
             if (e instanceof Ast.Member m)
             {
@@ -1347,6 +2001,19 @@ final class FastProgram
             }
             if (e instanceof Ast.Binary b)
             {
+                if (b.op().equals("and") || b.op().equals("or"))
+                {
+                    // 短路求值：左边定性了就跳过右边。
+                    // 与解释器同一语义——d != 0 and 1/d > x 这种守卫写法不能炸。
+                    int mark = nextReg;
+                    expr(b.a(), sc, dst);
+                    emit2(b.op().equals("and") ? OP_JZ : OP_JNZ, dst, 0);
+                    int skip = code.add(-1);
+                    expr(b.b(), sc, dst);
+                    code.set(skip, code.size());
+                    nextReg = mark;
+                    return;
+                }
                 T a = typeOf(b.a(), sc);
                 T c = typeOf(b.b(), sc);
                 int mark = nextReg;
@@ -1363,7 +2030,7 @@ final class FastProgram
                 call(c, sc, dst);
                 return;
             }
-            throw new Unsupported();
+            throw new Unsupported("这个表达式快速路径不支持");
         }
 
         private void member(Ast.Member m, Scope sc, int dst)
@@ -1377,7 +2044,7 @@ final class FastProgram
             int off = component(m.name());
             if (base != T.VEC3 || off < 0)
             {
-                throw new Unsupported();
+                throw new Unsupported("成员访问只支持 .x / .y / .z 和粒子属性");
             }
 
             // p.pos.x / p.axis.y …：单分量直取，省掉"搬整个向量再 PICK"
@@ -1428,6 +2095,7 @@ final class FastProgram
             {
                 case "abs": op = OP_ABS; break;
                 case "sqrt": op = OP_SQRT; break;
+                case "sign": op = OP_SIGN; break;
                 case "sin": op = OP_SIN; break;
                 case "cos": op = OP_COS; break;
                 case "exp": op = OP_EXP; break;
@@ -1435,6 +2103,8 @@ final class FastProgram
                 case "round": op = OP_ROUND; break;
                 case "min": op = OP_MIN; break;
                 case "max": op = OP_MAX; break;
+                case "pow": op = OP_POW; break;
+                case "atan2": op = OP_ATAN2; break;
                 case "clamp": op = OP_CLAMP; break;
                 case "smoothstep": op = OP_SMOOTHSTEP; break;
                 case "len": op = OP_LEN; break;
@@ -1443,11 +2113,13 @@ final class FastProgram
                 case "dot": op = OP_DOT; break;
                 case "cross": op = OP_CROSS; break;
                 case "dist": op = OP_DIST; break;
-                case "tangent": op = OP_TANGENT; break;
-                case "radial": op = OP_RADIAL; break;
+                case "tangent": op = args.size() == 3 ? OP_TANGENT_UP : OP_TANGENT; break;
+                case "radial": op = args.size() == 3 ? OP_RADIAL_UP : OP_RADIAL; break;
+                case "rotate": op = OP_ROTATE; break;
                 case "noise": op = OP_NOISE; break;
+                case "rand": op = OP_RAND; break;
                 case "lerp": op = typeOf(args.get(0), sc) == T.VEC3 ? OP_LERP_V : OP_LERP_N; break;
-                default: throw new Unsupported();
+                default: throw new Unsupported("快速路径不支持这个函数");
             }
 
             int mark = nextReg;
@@ -1498,6 +2170,9 @@ final class FastProgram
                 case "/":
                     emit3(a == T.VEC3 ? OP_DIV_SCALE : OP_DIV_N, dst, sa, sb);
                     return;
+                case "%":
+                    emit3(OP_MOD_N, dst, sa, sb);
+                    return;
                 case "<": emit3(OP_LT, dst, sa, sb); return;
                 case "<=": emit3(OP_LE, dst, sa, sb); return;
                 case ">": emit3(OP_GT, dst, sa, sb); return;
@@ -1506,7 +2181,7 @@ final class FastProgram
                 case "!=": emit3(OP_NE_N, dst, sa, sb); return;
                 case "and": emit3(OP_AND, dst, sa, sb); return;
                 case "or": emit3(OP_OR, dst, sa, sb); return;
-                default: throw new Unsupported();
+                default: throw new Unsupported("未知运算符");
             }
         }
 
@@ -1542,7 +2217,7 @@ final class FastProgram
                 case "targetR": op = OP_LTARGET; break;
                 case "r": op = OP_LR; break;
                 case "age": op = OP_LAGE; break;
-                default: throw new Unsupported();
+                default: throw new Unsupported("不认识的粒子属性");
             }
             emit1(op, dst);
         }
@@ -1552,7 +2227,7 @@ final class FastProgram
             int k = component(comp);
             if (k < 0)
             {
-                throw new Unsupported();
+                throw new Unsupported("分量只能是 .x / .y / .z");
             }
             int op;
             if (prop.equals("pos"))
@@ -1577,7 +2252,7 @@ final class FastProgram
             }
             else
             {
-                throw new Unsupported();
+                throw new Unsupported("这个属性没有逐分量读取");
             }
             emit1(op, dst);
         }
@@ -1587,7 +2262,7 @@ final class FastProgram
             int k = component(comp);
             if (k < 0)
             {
-                throw new Unsupported();
+                throw new Unsupported("分量只能是 .x / .y / .z");
             }
             if (prop.equals("pos"))
             {
@@ -1614,6 +2289,21 @@ final class FastProgram
 
         private void emitFree(String name, T t, int dst)
         {
+            Free f = free(name, t);
+            emit2(t == T.VEC3 ? OP_LDF3 : OP_LDF1, dst, f.offset);
+        }
+
+        /** 写回 cast 变量：先记在 fv 里，整段跑完由 {@link #completeStep} 搬回 Env */
+        private void emitFreeStore(String name, T t, int src)
+        {
+            Free f = free(name, t);
+            f.written = true;
+            emit3(t == T.VEC3 ? OP_STF3 : OP_STF1, 0, f.offset, src);
+        }
+
+        /** 取（或新建）一个自由变量的槽 */
+        private Free free(String name, T t)
+        {
             Free f = freeIndex.get(name);
             if (f == null)
             {
@@ -1622,12 +2312,12 @@ final class FastProgram
                 loop.freeSlots += width(t);
                 if (loop.freeSlots > MAX_REGS)
                 {
-                    throw new Unsupported();
+                    throw new Unsupported("cast 变量太多（超过 256 个槽）");
                 }
                 freeIndex.put(name, f);
                 loop.frees.add(f);
             }
-            emit2(t == T.VEC3 ? OP_LDF3 : OP_LDF1, dst, f.offset);
+            return f;
         }
 
         // ------------------------------------------------ 寄存器分配
@@ -1638,7 +2328,7 @@ final class FastProgram
             nextReg += width(t);
             if (nextReg > MAX_REGS)
             {
-                throw new Unsupported();
+                throw new Unsupported("表达式太复杂（寄存器超过 256 个）");
             }
             if (nextReg > maxReg)
             {
@@ -1653,15 +2343,32 @@ final class FastProgram
     private static final class IntList
     {
         private int[] data = new int[64];
+        /** 每条指令的源码位置（{@code line<<12|col}），运行期报错用；与 data 同步增长 */
+        private int[] pos = new int[64];
+        /** 接下来 add 的指令记成这个位置 */
+        private int curPos;
         private int size;
+
+        /**
+         * 声明"接下来的指令来自这几行"。行号/列号压进 12 位（脚本最多 20000 节点，
+         * 单行超过 4095 列不现实），不够的部分截断——定位只需要大致指到那一行。
+         */
+        void at(int line, int col)
+        {
+            int l = Math.max(0, Math.min(0xFFF, line));
+            int c = Math.max(0, Math.min(0xFFF, col));
+            curPos = (l << 12) | c;
+        }
 
         int add(int v)
         {
             if (size == data.length)
             {
                 data = java.util.Arrays.copyOf(data, size * 2);
+                pos = java.util.Arrays.copyOf(pos, size * 2);
             }
             data[size] = v;
+            pos[size] = curPos;
             return size++;
         }
 
@@ -1673,6 +2380,11 @@ final class FastProgram
         int[] toArray()
         {
             return java.util.Arrays.copyOf(data, size);
+        }
+
+        int[] positions()
+        {
+            return java.util.Arrays.copyOf(pos, size);
         }
 
         int size()

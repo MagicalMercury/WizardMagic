@@ -38,9 +38,12 @@ public final class SpellScripts
 {
     private static final Logger LOGGER = LoggerFactory.getLogger(WizardMagic.MODID + "/spell");
 
-    private static final String[] BUILT_IN = {"firestorm", "frost_nova", "flame_pillar"};
+    private static final String[] BUILT_IN =
+            {"firestorm", "frost_nova", "flame_pillar", "meteor", "fireball"};
 
     private static final Map<String, SpellScript> CACHE = new HashMap<>();
+    /** 最近一轮里编译失败的法术（给 /spell reload 显示） */
+    private static final List<String> ERRORS = new ArrayList<>();
 
     /** 最近一轮加载里缓存命中/重编的次数（命令与启动日志用） */
     private static int hits;
@@ -167,6 +170,7 @@ public final class SpellScripts
 
         int ok = 0;
         int failed = 0;
+        ERRORS.clear();
         for (String id : allIds(server))
         {
             try
@@ -177,6 +181,7 @@ public final class SpellScripts
             catch (ScriptException e)
             {
                 failed++;
+                ERRORS.add(id + " → " + e.display());
                 LOGGER.warn("[wizardmagic] 法术 {} 编译失败：{}", id, e.display());
             }
         }
@@ -185,6 +190,29 @@ public final class SpellScripts
                 ok, hits, rewrites, failed == 0 ? "" : "，失败 " + failed, SpellStorage.describe(server));
         LOGGER.info("[wizardmagic] {}", summary);
         return summary;
+    }
+
+    /**
+     * 最近一次 {@link #warmUp} / {@link #reloadAll} 里编译失败的法术（"id → 第 N 行第 M 列: 原因"）。
+     *
+     * <p>{@code /spell reload} 把它直接打给玩家：法术作者改了文件之后，最需要看到的
+     * 就是"我这一行错在哪"，而不是一行汇总里那个"失败 1"。</p>
+     */
+    public static List<String> errors()
+    {
+        return List.copyOf(ERRORS);
+    }
+
+    /**
+     * 重新读盘并全编一遍：改了 {@code .spell} 文件之后不用重启游戏。
+     *
+     * <p>注意作用范围：<b>已经在飞的法术云不会换脚本</b>（它们各自持有生成时的那份
+     * {@link SpellScript}），新的一次施法才用新代码。</p>
+     */
+    public static String reloadAll(MinecraftServer server)
+    {
+        reload();
+        return warmUp(server);
     }
 
     /** 清掉内存缓存；下次 {@link #load} 会重新读源码与缓存文件 */

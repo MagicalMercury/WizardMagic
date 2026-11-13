@@ -8,7 +8,7 @@ on cast {
         count: 2048
         life: 4.5
         shape: ring { radius: 0.7, thickness: 0.5 }
-        at: here()
+        at: aim(6)
     }
 }
 

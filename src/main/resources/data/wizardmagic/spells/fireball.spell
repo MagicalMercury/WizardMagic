@@ -1,0 +1,96 @@
+# spell v1 name="炎爆弹"
+# 飞出去的火球：从施法点沿视线射出去，撞到方块**或碰到生物**的那一刻炸开——火壳向外扩张、
+# 一团烟往上翻滚、范围内生物吃伤害。飞到期满没撞到东西就在半空炸。
+#
+# 五个关键点：
+#   1. 方向来自 look()（只有 on cast 能用），存进云级变量 dir 之后 tick 里用；
+#   2. 爆炸的**视觉**写在自定义事件 on explode 里，三个触发点各 call 一次——
+#      语言没有函数，自定义事件就是"给一段代码起名字"；
+#   3. 伤害写在各自的触发点里，因为三处的语义不一样：撞方块/半空炸是范围伤害，
+#      碰到生物是 hurt(0, 伤害)（半径 0 = 只打碰到的那个实体）；
+#   4. armed 云变量保证**只炸一次**（撞地后本体还活着，不卡就会二次爆炸）；
+#   5. end() 立刻结束这朵云（不跑 on expire），火球炸完就没了。
+#
+# on touch 只在服务端跑（客户端的实体位置和主机不一致，不能拿它判定），
+# 所以客户端看到的是"火球被移除包收掉"，爆炸的火壳由服务器下发——两边画面基本一致。
+#
+# 调窗口就看这几个数：速度 16、寿命 1.6（射程 ≈ 25 格）、爆炸半径 3.5、伤害 9。
+
+on cast {
+    let phase = 0          # 0 飞行 / 2 炸开
+    let armed = true       # 只炸一次
+    let dir = look()       # 施法朝向（cast 专属）
+    emit {
+        element: fire
+        count: 700
+        life: 2.5
+        shape: sphere { radius: 0.22 }
+        at: aim(1.5)
+    }
+}
+
+# 爆炸的画面：不写 at，火壳落在"事件点"（撞方块 = 撞击点，碰生物 = 接触点，寿终 = 质心）
+on explode {
+    emit {
+        element: fire
+        count: 900
+        life: 0.9
+        shape: sphere { radius: 0.35 }
+    }
+    emit {
+        element: mist
+        count: 240
+        life: 1.6
+        shape: sphere { radius: 0.8 }
+        inherit: false
+    }
+}
+
+on tick(dt) {
+    if (phase == 0) {
+        # 整团沿视线匀速前进。碰撞与"碰到生物"都由引擎在脚本之后判定。
+        # 注意：这里**不要**加任何竖直方向的偏移——look() 给的就是视线方向，
+        # 每步额外 +Y 会让弹道肉眼可见地往上飘。
+        for p in particles {
+            p.v = dir * 16.0
+            p.pos = p.pos + p.v * dt
+        }
+    }
+    if (phase == 2) {
+        # 炸开：每粒沿"远离爆心"的方向外扩，同时迅速熄火（energy 就是亮度）
+        for p in particles {
+            p.pos = p.pos + normalize(p.local) * (15.0 * dt)
+            p.energy = p.energy * max(0, 1 - 5.0 * dt)
+        }
+    }
+}
+
+on hit {
+    if (armed) {
+        armed = false
+        phase = 2
+        call explode()
+        hurt(3.5, 3.0)
+        end()
+    }
+}
+
+on touch {
+    if (armed) {
+        armed = false
+        phase = 2
+        call explode()
+        hurt(0, 5.5)     # 半径 0：只打碰到的那个生物
+        end()
+    }
+}
+
+on expire {
+    # 半空炸：不写 at，火壳/伤害都落在粒子现在的质心
+    if (armed) {
+        armed = false
+        phase = 2        # 半空炸的壳也要走"向外扩"，不能继续顺着 dir 飞
+        call explode()
+        hurt(3.0, 3.0)
+    }
+}

@@ -35,6 +35,7 @@ import net.minecraftforge.fml.common.Mod;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 /**
  * 法术调试命令（P0/P1 阶段）。
@@ -67,6 +68,7 @@ public final class SpellCommand
     {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
         dispatcher.register(Commands.literal("spell")
+                .then(Commands.literal("reload").executes(SpellCommand::reload))
                 .then(Commands.literal("debug")
                         .then(Commands.literal("spawn")
                                 .then(Commands.argument("element", StringArgumentType.word())
@@ -101,7 +103,9 @@ public final class SpellCommand
                         .then(Commands.literal("run")
                                 .then(Commands.argument("script", StringArgumentType.word())
                                         .suggests(SCRIPTS)
-                                        .executes(SpellCommand::runScript)))
+                                        .executes(ctx -> runScript(ctx, false))
+                                        .then(Commands.literal("interp")
+                                                .executes(ctx -> runScript(ctx, true)))))
                         .then(Commands.literal("scripts").executes(SpellCommand::listScripts))
                         .then(Commands.literal("cache").executes(SpellCommand::rebuildCache))
                         .then(Commands.literal("shapes").executes(SpellCommand::shapes))
@@ -224,13 +228,24 @@ public final class SpellCommand
         return 1;
     }
 
-    /** 用行为脚本施法：cast 在服务端求值一次，emit 出几朵云就生成几朵 */
-    private static int runScript(CommandContext<CommandSourceStack> ctx)
+    /**
+     * 用行为脚本施法：cast 在服务端求值一次，emit 出几朵云就生成几朵。
+     *
+     * <p><b>默认走和正常施法完全相同的路径</b>（生成时编译 → 寄存器机）。只有
+     * {@code /spell debug run <id> interp} 才强制解释器：那是"参考实现"，慢 5 倍左右，
+     * 只在需要对拍或排查"到底是不是编译器编错了"时才用。</p>
+     *
+     * @param interpreter true = 强制解释器（参考实现）
+     */
+    private static int runScript(CommandContext<CommandSourceStack> ctx, boolean interpreter)
     {
         String id = StringArgumentType.getString(ctx, "script");
         CommandSourceStack source = ctx.getSource();
         ServerLevel level = source.getLevel();
-        Vec3 here = aimPoint(source);
+        // here() = 施法原点：施法者的**眼睛位置**（不是"身前 6 格"）。
+        // 想在身前多少格出生就用脚本里的 aim(d)，别把偏移烘进命令里——
+        // 之前这里传的是瞄准点（眼睛 + 视线 × 6），所有法术都莫名其妙生在 6 格开外。
+        Vec3 here = originPoint(source);
 
         SpellScript script;
         try
@@ -247,7 +262,7 @@ public final class SpellCommand
         CastResult result;
         try
         {
-            result = script.cast(new McHost(level, here), seed);
+            result = script.cast(new McHost(level, here, look(source)), seed);
         }
         catch (ScriptException e)
         {
@@ -256,11 +271,19 @@ public final class SpellCommand
         }
 
         int spawned = 0;
+        Entity casterEntity = source.getEntity();
+        UUID caster = casterEntity == null ? null : casterEntity.getUUID();
         for (int i = 0; i < result.emits().size(); i++)
         {
             EmitSpec spec = result.emits().get(i);
-            if (SpellCloudManager.spawnScripted(level, script, spec, seed + i, result.vars()) != null)
+            SpellCloud cloud = SpellCloudManager.spawnScripted(level, script, spec, seed + i,
+                    result.vars(), caster);
+            if (cloud != null)
             {
+                // 默认走**正常施法**的路径（生成时编译 → 寄存器机）。
+                // 只有显式写 /spell debug run <id> interp 才强制解释器——那是拿来和
+                // 编译执行逐位对拍的参考实现，慢 5 倍左右。
+                cloud.setInterpreted(interpreter);
                 spawned++;
             }
             else
@@ -271,8 +294,12 @@ public final class SpellCommand
         }
         final int cloudCount = spawned;
         final int nodes = script.nodes();
+        String backend = interpreter ? "解释器（强制·参考实现）"
+                : script.fastPathActive() ? "寄存器机"
+                : "解释器（编不出来：" + script.fastPathReason() + "）";
         source.sendSuccess(() -> Component.literal(String.format(Locale.ROOT,
-                "[spell] %s 节点=%d 云=%d seed=%d", id, nodes, cloudCount, seed)), false);
+                "[spell] %s 节点=%d 云=%d seed=%d 后端=%s",
+                id, nodes, cloudCount, seed, backend)), false);
         return spawned;
     }
 
@@ -296,6 +323,10 @@ public final class SpellCommand
                         .append(' ').append(s.nodes()).append(" 节点")
                         .append(s.fastPathActive() ? " 快速路径" : " 解释器")
                         .append(bytes >= 0 ? " 缓存" + bytes + "B" : " 无缓存");
+                if (!s.fastPathActive() && s.fastPathReason() != null)
+                {
+                    sb.append("（").append(s.fastPathReason()).append("）");
+                }
             }
             catch (ScriptException e)
             {
@@ -307,10 +338,27 @@ public final class SpellCommand
     }
 
     /** 重新读源码、重编、覆盖存档里的编译产物 */
+    /**
+     * 重新读盘并全编一遍：改了 {@code .spell} 文件之后不用重启游戏。
+     *
+     * <p>法术作者的主循环就是 {@code /spell reload} → {@code /spell debug run <id>}：
+     * 前者重读源码 + 重编 + 重写编译缓存，后者立刻用新代码放一次。编译失败会把
+     * <b>哪一行哪一列错在哪里</b>直接打在聊天栏里（不只写进日志）。</p>
+     */
+    private static int reload(CommandContext<CommandSourceStack> ctx)
+    {
+        String summary = SpellScripts.reloadAll(ctx.getSource().getServer());
+        ctx.getSource().sendSuccess(() -> Component.literal("[spell] 已重载：" + summary), false);
+        for (String err : SpellScripts.errors())
+        {
+            ctx.getSource().sendFailure(Component.literal("[spell] 编译失败 " + err));
+        }
+        return SpellScripts.errors().isEmpty() ? 1 : 0;
+    }
+
     private static int rebuildCache(CommandContext<CommandSourceStack> ctx)
     {
-        SpellScripts.reload();
-        String summary = SpellScripts.warmUp(ctx.getSource().getServer());
+        String summary = SpellScripts.reloadAll(ctx.getSource().getServer());
         ctx.getSource().sendSuccess(() -> Component.literal("[spell] 已重建编译缓存：" + summary), false);
         return 1;
     }
@@ -322,6 +370,14 @@ public final class SpellCommand
         return Shapes.count();
     }
 
+    /** 施法原点（{@code here()}）：施法者的眼睛位置；没有实体来源时用命令位置 */
+    private static Vec3 originPoint(CommandSourceStack source)
+    {
+        Entity entity = source.getEntity();
+        return entity == null ? source.getPosition() : entity.getEyePosition();
+    }
+
+    /** 瞄准点：眼睛 + 视线 × 6，{@code /spell debug spawn} / {@code cast} 用 */
     private static Vec3 aimPoint(CommandSourceStack source)
     {
         Vec3 pos = source.getPosition();
@@ -331,6 +387,17 @@ public final class SpellCommand
             pos = entity.getEyePosition().add(entity.getLookAngle().scale(6.0));
         }
         return pos;
+    }
+
+    /** 施法朝向（{@code look()}）：玩家/生物的眼睛方向；命令方块这类无实体来源用 +Z */
+    private static Vec3 look(CommandSourceStack source)
+    {
+        Entity entity = source.getEntity();
+        if (entity != null)
+        {
+            return entity.getLookAngle();
+        }
+        return new Vec3(0.0, 0.0, 1.0);
     }
 
     private static int clear(CommandContext<CommandSourceStack> ctx)
@@ -351,10 +418,14 @@ public final class SpellCommand
         for (int i = 0; i < show; i++)
         {
             SpellCloud cloud = clouds.get(i);
+            String backend = cloud.interpreted() ? "解释器(强制)"
+                    : cloud.script == null ? "定律"
+                    : cloud.script.fastPathActive() ? "寄存器机"
+                    : "解释器(退化)";
             ctx.getSource().sendSuccess(() -> Component.literal(String.format(Locale.ROOT,
-                    "[spell] #%d %s 粒子=%d seed=%d 步=%d/%d",
+                    "[spell] #%d %s 粒子=%d seed=%d 步=%d/%d 后端=%s",
                     cloud.id, SpellElements.id(cloud.elementId), cloud.count, cloud.castSeed,
-                    cloud.ageSteps(), cloud.maxSteps)), false);
+                    cloud.ageSteps(), cloud.maxSteps, backend)), false);
         }
         if (clouds.size() > show)
         {

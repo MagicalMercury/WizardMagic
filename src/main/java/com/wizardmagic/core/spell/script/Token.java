@@ -10,12 +10,12 @@ public record Token(Kind kind, String text, double num, int line, int col)
 {
     public enum Kind
     {
-        NUM, IDENT,
+        NUM, IDENT, STR,
         LPAREN, RPAREN, LBRACE, RBRACE, COMMA, COLON, DOT,
         ASSIGN, EQ, NE, LT, LE, GT, GE,
-        PLUS, MINUS, STAR, SLASH,
+        PLUS, MINUS, STAR, SLASH, PERCENT,
         PLUS_ASSIGN, MINUS_ASSIGN, STAR_ASSIGN, SLASH_ASSIGN,
-        LET, IF, ELSE, FOR, IN, PARTICLES, ON, EMIT, PARAM,
+        LET, IF, ELSE, FOR, IN, PARTICLES, ON, EMIT, PARAM, CALL,
         AND, OR, NOT, TRUE, FALSE,
         EOF
     }

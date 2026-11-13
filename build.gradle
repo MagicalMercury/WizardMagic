@@ -96,6 +96,8 @@ repositories {
         }
     }
 
+    maven { url 'https://maven.aliyun.com/repository/public' }
+
     // NeoForge 依赖的公开库（log4j、cpw.mods、asm 等）
     mavenCentral()
 
@@ -124,6 +126,22 @@ dependencies {
     // Example mod dependency using a mod jar from ./libs with a flat dir repository
     // flatDir { dir 'libs' } in repositories, then:
     // implementation fg.deobf("blank:coolmod-${minecraft_version}:${coolmod_version}")
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.2'
+    testRuntimeOnly   'org.junit.platform:junit-platform-launcher'   // Gradle 8.x 需要
+}
+
+test {
+    useJUnitPlatform()        // 少这句 JUnit5 用例一律扫不到
+    // 逐条 [ok] 不往控制台放（IDEA 会把 stdout 再流一遍，导致每条出现两次、
+    // 两个套件互相穿插）。失败时清单在断言消息里，所以这里放开异常格式别截断；
+    // 想要完整清单直接跑 gradlew spellScriptCheck / spellLawsCheck。
+    systemProperty 'file.encoding', 'UTF-8'
+    testLogging {
+        exceptionFormat = 'full'
+    }
 }
 
 // Expands ${} placeholders in mods.toml / pack.mcmeta from gradle.properties.
@@ -204,6 +222,15 @@ tasks.register('spellScriptCheck', JavaExec) {
     args 'quick'
 }
 
+// 脚本语言"语义"专项：运算符/短路/类型/内建/emit 校验/编译期检查/运行期定位/
+// 双后端逐位对拍/字节码往返。和 spellScriptCheck 分开，失败时一眼看出是哪一类。
+tasks.register('spellSpecCheck', JavaExec) {
+    group = 'verification'
+    description = '脚本语言正确性专项：语义矩阵 + 双后端对拍 + 诊断定位'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSpecCheck'
+}
+
 tasks.register('spellLawsCheck', JavaExec) {
     group = 'verification'
     description = '法术粒子层自检：元素表/噪声/确定性/形状采样/单步成本'
@@ -219,15 +246,47 @@ tasks.register('spellPerf', JavaExec) {
     args 'perf'
 }
 
+// 百万粒子压测：突破单朵 4096 / 每维度 26 万的准入上限，只看斜率。
+// 结果不能代表正常游玩——正常不会这么跑。
+tasks.register('spellMillion', JavaExec) {
+    group = 'verification'
+    description = '百万粒子压测（火焰风暴，单朵 1M + 245 朵 × 4096 + 碰撞）'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
+    args 'million'
+    maxHeapSize = '2g'
+    jvmArgs '-Dwizardmagic.spell.maxParticles=1048576'
+}
+
+// 采样剖面：跑 15 秒火焰风暴并写 JFR，用 `jfr print` 看热点
+tasks.register('spellProf', JavaExec) {
+    group = 'verification'
+    description = '火焰风暴热点采样（JFR，输出 build/firestorm.jfr）'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
+    args 'prof'
+    jvmArgs '-XX:StartFlightRecording=filename=build/firestorm.jfr,settings=profile,dumponexit=true',
+            '-Dwizardmagic.prof.ms=15000'
+}
+
+// 微基准：单个函数的 ns 成本（unit/sin/centerAt/targetR/noise/exp/sqrt）
+tasks.register('spellMicro', JavaExec) {
+    group = 'verification'
+    description = '单函数微基准（判断热点到底是形状、噪声还是 VM 分派）'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
+    args 'micro'
+}
+
 tasks.register('spellCheck') {
     group = 'verification'
     description = '离机自检门禁（不含性能测量）'
-    dependsOn 'spellScriptCheck', 'spellLawsCheck'
+    dependsOn 'spellScriptCheck', 'spellSpecCheck', 'spellLawsCheck'
 }
 
-tasks.named('check') {
-    dependsOn 'spellCheck'
-}
+// 门禁由 ScriptSelfCheckTest / SpellSelfCheckTest 这两个 JUnit 壳子接管（挂在 test 上）。
+// 下面的 JavaExec 保留下来，用来出逐条 [ok] 清单和性能数字，不参与 test/check，
+// 免得同一套断言跑两遍。
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
 idea {

@@ -26,4 +26,17 @@ public interface Host
     double hereY();
 
     double hereZ();
+
+    /**
+     * 施法朝向（{@code look()}，已归一化）。
+     *
+     * <p>没有它就只能写"在某个点炸开"的法术——投射物（火球飞出去再炸）需要一个方向。
+     * 和 {@code here()} 一样只在 {@code on cast} 可用：{@code tick} 里读它没有意义
+     * （两端朝向未必一致），所以编译期就拒。</p>
+     */
+    double lookX();
+
+    double lookY();
+
+    double lookZ();
 }
