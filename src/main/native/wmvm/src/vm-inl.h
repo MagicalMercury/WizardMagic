@@ -54,7 +54,9 @@ enum : int
     OP_TANGENT = 81, OP_RADIAL = 82, OP_PICK = 83, OP_NOISE = 84,
     OP_JNZ = 85, OP_RAND = 86, OP_STF1 = 87, OP_STF3 = 88,
     OP_TANGENT_UP = 89, OP_RADIAL_UP = 90, OP_ROTATE = 91,
-    OP_MOD_N = 92, OP_SIGN = 93, OP_POW = 94, OP_ATAN2 = 95
+    OP_MOD_N = 92, OP_SIGN = 93, OP_POW = 94, OP_ATAN2 = 95,
+    /** [SEL|d][cond|x] + [y]：d ← (r[cond] != 0) ? r[x] : r[y]（if-conversion 用） */
+    OP_SELECT = 96
 };
 
 /** 指令占几个 int（多字指令自己带后续词） */
@@ -73,6 +75,7 @@ static inline int op_length(int op)
         case OP_TANGENT_UP:
         case OP_RADIAL_UP:
         case OP_ROTATE:
+        case OP_SELECT:
             return 2;
         case OP_NOISE:
             return 3;
@@ -497,6 +500,13 @@ static inline int run_1lane(const Program& p, WmvmBatch& b, double* fv, const do
                 case OP_NOT:
                     r[d] = r[a] == 0.0 ? 1.0 : 0.0;
                     break;
+                case OP_SELECT:
+                {
+                    // word0: op|dst|cond|x，word1: y —— 两条路径都算完再挑（不是插值）
+                    const int y = code[pc++];
+                    r[d] = r[a] != 0.0 ? r[bb] : r[y];
+                    break;
+                }
 
                 // ------------------------------------------------ 控制流
                 case OP_JZ:

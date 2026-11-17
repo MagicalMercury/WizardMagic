@@ -101,7 +101,8 @@ enum
     ADD_N = 41, MUL_N = 43, ADD_V = 46, SCALE = 48,
     GT = 53, JZ = 60, JMP = 61, JNZ = 85,
     SQRT = 63, NOISE = 84, RAND = 86,
-    LEN = 77, DOT = 75, PICK = 83
+    LEN = 77, DOT = 75, PICK = 83,
+    SELECT = 96
 };
 
 /** 65536 项 sin 表：自检时用 std::sin 造一张，真实场景由 Java 灌入 */
@@ -208,6 +209,60 @@ int main()
             expect_bits("分支：负数不动", px[0], bits(-1.0));
             expect_bits("分支：零不动", px[1], bits(0.0));
             expect_bits("分支：正数改成 100", px[2], bits(100.0));
+            wmvm_program_destroy(prog);
+        }
+    }
+
+    // ---------------- 2b) SELECT：两条路径都算完再挑（if-conversion 的目标指令）
+    {
+        // r5 = (px > 0.5) ? 7 : 9 → 写回 px
+        Asm s;
+        s.op(LPOSX, 0, 0, 0);
+        s.op(LDK, 1, 0, 0);
+        s.code.push_back(s.k(0.5));
+        s.op(GT, 2, 0, 1);
+        s.op(LDK, 3, 0, 0);
+        s.code.push_back(s.k(7.0));
+        s.op(LDK, 4, 0, 0);
+        s.code.push_back(s.k(9.0));
+        s.op(SELECT, 5, 2, 3);
+        s.code.push_back(4);                        // 第三寄存器：假分支的值
+        s.op(SPOSX, 5, 0, 0);
+
+        WmvmProgram* prog = wmvm_program_create(s.code.data(), static_cast<int>(s.code.size()),
+                s.consts.data(), static_cast<int>(s.consts.size()));
+        expect_true("SELECT 程序编译", prog != nullptr);
+        if (prog != nullptr)
+        {
+            // 3 颗 < 4 lane ⇒ 标量内核
+            {
+                std::vector<double> px{0.2, 0.8, 0.2}, py(3, 0.0), pz(3, 0.0);
+                std::vector<double> vx(3, 0.0), vy(3, 0.0), vz(3, 0.0);
+                std::vector<float> en(3, 0.0f);
+                WmvmBatch b = make_batch(3, px, py, pz, vx, vy, vz, en);
+                double fv[8] = {0}, hv[8] = {0};
+                const int rc = wmvm_run(prog, &b, fv, hv);
+                expect_true("SELECT：标量段正常结束", rc == 0);
+                expect_bits("SELECT：条件假取 y（标量）", px[0], bits(9.0));
+                expect_bits("SELECT：条件真取 x（标量）", px[1], bits(7.0));
+            }
+            // 8 颗 ⇒ 走 2 组 4 lane 向量内核
+            {
+                std::vector<double> px(8), py(8, 0.0), pz(8, 0.0);
+                for (int i = 0; i < 8; ++i)
+                {
+                    px[i] = (i & 1) != 0 ? 0.8 : 0.2;
+                }
+                std::vector<double> vx(8, 0.0), vy(8, 0.0), vz(8, 0.0);
+                std::vector<float> en(8, 0.0f);
+                WmvmBatch b = make_batch(8, px, py, pz, vx, vy, vz, en);
+                double fv[8] = {0}, hv[8] = {0};
+                const int rc = wmvm_run(prog, &b, fv, hv);
+                expect_true("SELECT：向量段正常结束", rc == 0);
+                expect_bits("SELECT：第 1 通道假取 y", px[0], bits(9.0));
+                expect_bits("SELECT：第 2 通道真取 x", px[1], bits(7.0));
+                expect_bits("SELECT：末通道真取 x", px[7], bits(7.0));
+            }
             wmvm_program_destroy(prog);
         }
     }

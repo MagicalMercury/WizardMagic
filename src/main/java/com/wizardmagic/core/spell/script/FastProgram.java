@@ -166,7 +166,7 @@ final class FastProgram
      * <p><b>动 {@link RegVm} 的指令编码、寄存器分配规则，或 {@link #collectLets} 的编号顺序时
      * 必须 +1</b>：存档里的 {@code .spellc} 只认这个号，不认"长得差不多"。</p>
      */
-    static final int IR_VERSION = 7;
+    static final int IR_VERSION = 8;
 
     /** 类型序号会写进字节码缓存，<b>别重排这个枚举</b> */
     private static final T[] TYPES = T.values();

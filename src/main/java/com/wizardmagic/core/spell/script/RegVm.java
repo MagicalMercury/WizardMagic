@@ -69,6 +69,7 @@ final class RegVm
             case OP_TANGENT_UP:
             case OP_RADIAL_UP:
             case OP_ROTATE:
+            case OP_SELECT:
                 return 2;
             case OP_NOISE:
                 return 3;
@@ -239,6 +240,19 @@ final class RegVm
     static final int OP_POW = 94;
     /** d = atan2(a, b) */
     static final int OP_ATAN2 = 95;
+
+    /**
+     * [SEL|d][cond|x] + [y]：{@code d ← (r[cond] != 0) ? r[x] : r[y]}
+     *
+     * <p>给 if-conversion 用：分支体的两条路径都算出来，再用这条挑一个。锁步 SIMD 的
+     * 大敌是分歧（每条 lane 走不同路径 ⇒ 两条路都得跑 + 掩码慢路径），换成无条件选值
+     * 之后就没有 per-lane 的 pc 了。</p>
+     *
+     * <p>语义务必与"真分支"逐位一致：判据是 {@code r[cond] != 0}，选中值原样拷贝
+     * （不是 lerp —— 插值会改末位）。</p>
+     */
+    static final int OP_SELECT = 96;
+
     // ---------------------------------------------------------------- 热循环
 
     /**
@@ -441,6 +455,16 @@ final class RegVm
                     case OP_NOT:
                         compare(w, r);
                         break;
+
+                    // if-conversion 的选值：两条路径都算出来，这里挑一个（不是插值）
+                    case OP_SELECT:
+                    {
+                        final int cond = (w >>> A_SHIFT) & FIELD;
+                        final int x = w & FIELD;
+                        final int y = code[pc++];
+                        r[(w >>> DST_SHIFT) & FIELD] = r[cond] != 0.0 ? r[x] : r[y];
+                        break;
+                    }
 
                     // ------------------------------------------------ 控制流
                     case OP_JZ:

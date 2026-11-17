@@ -435,6 +435,13 @@ int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* h
                 case ::wmvm::OP_NOT:
                     set(dst, IfThenElse(Eq(r[a], zero), one, zero));
                     break;
+                case ::wmvm::OP_SELECT:
+                {
+                    // 两条路径都算完再挑：没有 per-lane 跳转，组内分歧消失
+                    const int y = code[ip + 1];
+                    set(dst, IfThenElse(Ne(r[a], zero), r[bb], r[y]));
+                    break;
+                }
 
                 // ------------------------------------------------ 控制流
                 case ::wmvm::OP_JZ:
