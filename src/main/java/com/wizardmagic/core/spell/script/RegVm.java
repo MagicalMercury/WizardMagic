@@ -209,7 +209,6 @@ final class RegVm
     static final int OP_POW = 94;
     /** d = atan2(a, b) */
     static final int OP_ATAN2 = 95;
-
     // ---------------------------------------------------------------- 热循环
 
     /**
@@ -442,18 +441,22 @@ final class RegVm
                     case OP_ABS:
                     case OP_SQRT:
                     case OP_SIGN:
-                    case OP_SIN:
-                    case OP_COS:
                     case OP_EXP:
                     case OP_FLOOR:
                     case OP_ROUND:
-                        math1(w, r);
+                        mathBasic(w, r);
+                        break;
+                    case OP_SIN:
+                    case OP_COS:
+                        mathTrig(w, r);
                         break;
                     case OP_MIN:
                     case OP_MAX:
+                        mathMinMax(w, r);
+                        break;
                     case OP_POW:
                     case OP_ATAN2:
-                        math2(w, r);
+                        mathPowAtan2(w, r);
                         break;
                     case OP_CLAMP:
                     {
@@ -804,8 +807,14 @@ final class RegVm
         }
     }
 
-    /** ABS / SQRT / SIN / COS / EXP / FLOOR / ROUND */
-    private static void math1(int w, double[] r)
+    /**
+     * ABS / SQRT / SIGN / EXP / FLOOR / ROUND（热路径）。
+     *
+     * <p>原来把 sin/cos 也塞在同一个方法里（194 字节），C2 判定 "too big" 拒绝内联；
+     * 拆成两组之后这个只有 ~90 字节，能稳定内联。sin/cos 单独一组，只有真用到的脚本
+     * 才付那次调用。</p>
+     */
+    private static void mathBasic(int w, double[] r)
     {
         int d = (w >>> DST_SHIFT) & FIELD;
         double a = r[(w >>> A_SHIFT) & FIELD];
@@ -815,30 +824,41 @@ final class RegVm
             case OP_SQRT: r[d] = Math.sqrt(Math.max(0.0, a)); break;
             // sign 用比较写出来，避免 Math.signum 的 ±0.0 细节在两端有任何差异
             case OP_SIGN: r[d] = a > 0.0 ? 1.0 : a < 0.0 ? -1.0 : 0.0; break;
-            case OP_SIN: r[d] = SpellMath.sin(a); break;
-            case OP_COS: r[d] = SpellMath.cos(a); break;
-            case OP_EXP: r[d] = Math.exp(a); break;
+            // StrictMath：Math.exp 是平台 intrinsic（实测 50 万样本 48,502 个 bit 与 fdlibm 不同），
+            // 跨 JVM/跨平台/与将来的 C++ 内核都不可能一致。整数契约从这里开始就是 fdlibm。
+            case OP_EXP: r[d] = StrictMath.exp(a); break;
             case OP_FLOOR: r[d] = Math.floor(a); break;
             default: r[d] = Math.round(a); break;
         }
     }
 
-    /** MIN / MAX / POW / ATAN2 */
-    private static void math2(int w, double[] r)
+    /** SIN / COS（查表，冷一些） */
+    private static void mathTrig(int w, double[] r)
+    {
+        int d = (w >>> DST_SHIFT) & FIELD;
+        double a = r[(w >>> A_SHIFT) & FIELD];
+        r[d] = (w >>> 24) == OP_SIN ? SpellMath.sin(a) : SpellMath.cos(a);
+    }
+
+    /** MIN / MAX（热路径，单独拆出来以便内联） */
+    private static void mathMinMax(int w, double[] r)
     {
         int a = (w >>> A_SHIFT) & FIELD;
         double x = r[a];
         double y = r[w & FIELD];
-        int d = (w >>> DST_SHIFT) & FIELD;
-        switch (w >>> 24)
-        {
-            case OP_MIN: r[d] = Math.min(x, y); break;
-            case OP_MAX: r[d] = Math.max(x, y); break;
-            // StrictMath：Math.pow / Math.atan2 允许 ±1 ulp 的平台差异，两端是不同 JVM，
-            // 用 StrictMath 才能保证服务端和客户端逐位一致（解释器那边也是 StrictMath）。
-            case OP_POW: r[d] = StrictMath.pow(x, y); break;
-            default: r[d] = StrictMath.atan2(x, y); break;
-        }
+        r[(w >>> DST_SHIFT) & FIELD] = (w >>> 24) == OP_MIN ? Math.min(x, y) : Math.max(x, y);
+    }
+
+    /** POW / ATAN2（StrictMath，冷路径） */
+    private static void mathPowAtan2(int w, double[] r)
+    {
+        int a = (w >>> A_SHIFT) & FIELD;
+        double x = r[a];
+        double y = r[w & FIELD];
+        // StrictMath：Math.pow / Math.atan2 允许 ±1 ulp 的平台差异，两端是不同 JVM，
+        // 用 StrictMath 才能保证服务端和客户端逐位一致（解释器那边也是 StrictMath）。
+        r[(w >>> DST_SHIFT) & FIELD] = (w >>> 24) == OP_POW
+                ? StrictMath.pow(x, y) : StrictMath.atan2(x, y);
     }
 
     /** MOD：除数为 0 与除法同语义（抛错，而不是返回 NaN） */

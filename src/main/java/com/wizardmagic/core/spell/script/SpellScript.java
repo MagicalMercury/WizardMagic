@@ -755,4 +755,15 @@ public final class SpellScript
         }
         return String.join(" / ", out);
     }
+
+    /**
+     * 诊断：4 通道寄存器机被真正调用过多少次（0 = 没启用，或没走到 4 通道）。
+     *
+     * <p>存在意义：`RegVm4` 的开关是静态属性，光看"自检全绿"分不出
+     * "4 通道跑过且逐位正确" 和 "4 通道压根没启用"。自检末尾会打印这个数。</p>
+     */
+    public static long lanesExecutions()
+    {
+        return RegVm4.executedCount();
+    }
 }

@@ -135,6 +135,7 @@ dependencies {
 
 test {
     useJUnitPlatform()        // 少这句 JUnit5 用例一律扫不到
+    systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
     // 逐条 [ok] 不往控制台放（IDEA 会把 stdout 再流一遍，导致每条出现两次、
     // 两个套件互相穿插）。失败时清单在断言消息里，所以这里放开异常格式别截断；
     // 想要完整清单直接跑 gradlew spellScriptCheck / spellLawsCheck。
@@ -212,6 +213,8 @@ tasks.withType(JavaCompile).configureEach {
 tasks.withType(JavaExec).configureEach {
     // 自检输出全是中文，强制 UTF-8 免得控制台一片乱码
     jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8'
+    // 4 通道寄存器机（RegVm4）默认关闭；`-Planes=1` 跑一遍"4 通道 vs 标量"的对拍
+    systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
 }
 
 tasks.register('spellScriptCheck', JavaExec) {

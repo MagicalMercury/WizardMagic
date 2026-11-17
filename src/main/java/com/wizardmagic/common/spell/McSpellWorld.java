@@ -36,6 +36,22 @@ public final class McSpellWorld implements SpellWorld
     /** 施法者（跳过；{@code null} = 无主伤害，谁都打） */
     private final UUID owner;
 
+    // ---- 粒子占用格表（每步按需重建；本对象每朵云一份，服务端主线程串行使用） ----
+    /** 格子边长（格）：1 格，和方块对齐 */
+    private static final double CELL = 1.0;
+    /** 格表上限：超过就退回逐实体全扫（避免一朵大云长期占着几 MB 的格表） */
+    private static final int MAX_GRID_CELLS = 1 << 18;
+    private int[] cellStart = new int[0];
+    private int[] cellCursor = new int[0];
+    private int[] cellItem = new int[0];
+    private int[] particleCell = new int[0];
+    private int originX;
+    private int originY;
+    private int originZ;
+    private int sizeX;
+    private int sizeY;
+    private int sizeZ;
+
     public McSpellWorld(ServerLevel level, UUID owner)
     {
         this.level = level;
@@ -119,6 +135,11 @@ public final class McSpellWorld implements SpellWorld
         {
             return List.of();
         }
+        // 粒子占用格表：每步建一次 O(n)，之后每个实体只查它身体覆盖的少数格子。
+        // 原来是对每个候选实体都全扫一遍粒子（O(实体数 × n)），生物一多就是几十万次/步。
+        // 只有 1–2 个候选时，建表的 O(n) 反而比直接扫更贵，走全扫。
+        boolean grid = candidates.size() > 2
+                && buildGrid(cloud, loX, loY, loZ, hiX, hiY, hiZ, pr, n);
         List<Touch> out = new ArrayList<>(candidates.size());
         for (LivingEntity target : candidates)
         {
@@ -127,22 +148,143 @@ public final class McSpellWorld implements SpellWorld
                 continue;
             }
             AABB body = target.getBoundingBox().inflate(pr);
-            for (int i = 0; i < n; i++)
+            int i = grid ? firstParticleIn(body, cloud) : firstParticleInBrute(body, cloud);
+            if (i < 0)
             {
-                double px = cloud.x(i);
-                double py = cloud.y(i);
-                double pz = cloud.z(i);
-                if (body.contains(px, py, pz))
+                continue;
+            }
+            Vec3 c = target.position();
+            out.add(new Touch(target.getId(),
+                    BuiltInRegistries.ENTITY_TYPE.getKey(target.getType()).toString(),
+                    c.x, c.y, c.z, target.getHealth(),
+                    cloud.x(i), cloud.y(i), cloud.z(i)));
+        }
+        return out;
+    }
+
+    /** 按当前粒子包围盒建占用格表；太大（> 1M 格）返回 false，调用方退回全扫 */
+    private boolean buildGrid(SpellCloud cloud, double loX, double loY, double loZ,
+                              double hiX, double hiY, double hiZ, double pr, int n)
+    {
+        int x0 = floor(loX - pr);
+        int y0 = floor(loY - pr);
+        int z0 = floor(loZ - pr);
+        int x1 = floor(hiX + pr);
+        int y1 = floor(hiY + pr);
+        int z1 = floor(hiZ + pr);
+        long sx = (long) x1 - x0 + 1L;
+        long sy = (long) y1 - y0 + 1L;
+        long sz = (long) z1 - z0 + 1L;
+        long volume = sx * sy * sz;
+        if (volume <= 0L || volume > MAX_GRID_CELLS)
+        {
+            return false;
+        }
+        int cells = (int) volume;
+        if (cellStart.length < cells + 1)
+        {
+            cellStart = new int[cells + 1];
+            cellCursor = new int[cells + 1];
+        }
+        if (cellItem.length < n)
+        {
+            cellItem = new int[n];
+            particleCell = new int[n];
+        }
+        originX = x0;
+        originY = y0;
+        originZ = z0;
+        sizeX = (int) sx;
+        sizeY = (int) sy;
+        sizeZ = (int) sz;
+
+        // 计数排序：O(n + 格数)
+        java.util.Arrays.fill(cellStart, 0, cells + 1, 0);
+        for (int i = 0; i < n; i++)
+        {
+            int c = cellOf(cloud.x(i), cloud.y(i), cloud.z(i));
+            particleCell[i] = c;
+            cellStart[c + 1]++;
+        }
+        for (int k = 0; k < cells; k++)
+        {
+            cellStart[k + 1] += cellStart[k];
+        }
+        System.arraycopy(cellStart, 0, cellCursor, 0, cells);
+        for (int i = 0; i < n; i++)
+        {
+            cellItem[cellCursor[particleCell[i]]++] = i;
+        }
+        return true;
+    }
+
+    /** 实体包围盒里下标最小的粒子（与"逐粒从头扫、取第一个"语义一致） */
+    private int firstParticleIn(AABB body, SpellCloud cloud)
+    {
+        int ix0 = Math.max(0, floor(body.minX) - originX);
+        int ix1 = Math.min(sizeX - 1, floor(body.maxX) - originX);
+        int iy0 = Math.max(0, floor(body.minY) - originY);
+        int iy1 = Math.min(sizeY - 1, floor(body.maxY) - originY);
+        int iz0 = Math.max(0, floor(body.minZ) - originZ);
+        int iz1 = Math.min(sizeZ - 1, floor(body.maxZ) - originZ);
+        int best = Integer.MAX_VALUE;
+        for (int ix = ix0; ix <= ix1; ix++)
+        {
+            for (int iy = iy0; iy <= iy1; iy++)
+            {
+                for (int iz = iz0; iz <= iz1; iz++)
                 {
-                    Vec3 c = target.position();
-                    out.add(new Touch(target.getId(),
-                            BuiltInRegistries.ENTITY_TYPE.getKey(target.getType()).toString(),
-                            c.x, c.y, c.z, target.getHealth(), px, py, pz));
-                    break;
+                    int c = (ix * sizeY + iy) * sizeZ + iz;
+                    int end = cellStart[c + 1];
+                    for (int k = cellStart[c]; k < end; k++)
+                    {
+                        int i = cellItem[k];
+                        if (i < best && body.contains(cloud.x(i), cloud.y(i), cloud.z(i)))
+                        {
+                            best = i;
+                            if (best == 0)
+                            {
+                                return 0;
+                            }
+                        }
+                    }
                 }
             }
         }
-        return out;
+        return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    private static int firstParticleInBrute(AABB body, SpellCloud cloud)
+    {
+        int n = cloud.count;
+        for (int i = 0; i < n; i++)
+        {
+            if (body.contains(cloud.x(i), cloud.y(i), cloud.z(i)))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int cellOf(double x, double y, double z)
+    {
+        int ix = clampCell(floor(x) - originX, sizeX);
+        int iy = clampCell(floor(y) - originY, sizeY);
+        int iz = clampCell(floor(z) - originZ, sizeZ);
+        return (ix * sizeY + iy) * sizeZ + iz;
+    }
+
+    private static int clampCell(int v, int size)
+    {
+        return v < 0 ? 0 : (v >= size ? size - 1 : v);
+    }
+
+    /** 比 {@code (int) Math.floor(v)} 快，且对负数正确 */
+    private static int floor(double v)
+    {
+        int i = (int) v;
+        return v < i ? i - 1 : i;
     }
 
     private boolean skip(LivingEntity target)

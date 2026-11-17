@@ -16,7 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.FloatBuffer;
 
 /**
- * 独立 GL 管线的实例化渲染器：自管 VAO + 两个 VBO（静态 quad 模板 + 动态实例数据）。
+ * 独立 GL 管线的实例化渲染器：自管 VAO + quad 模板 VBO + **双缓冲实例 VBO**。
  *
  * <pre>
  * 每实例 11 个 float (44B):
@@ -40,7 +40,12 @@ public final class SparkInstancedRenderer
 
     private static int vao = -1;
     private static int quadVbo;
-    private static int instVbo;
+    /** 双缓冲实例 VBO：本帧画 A 时，CPU 可以往 B 里写，避免驱动等 GPU 读完再回写 */
+    private static final int[] instVbo = {-1, -1};
+    /** 下一次上传写哪个缓冲 */
+    private static int uploadIndex;
+    /** 当前正在被绘制读取的缓冲 */
+    private static int activeVbo;
     private static FloatBuffer instanceBuffer;
     private static int capacity;
 
@@ -74,11 +79,16 @@ public final class SparkInstancedRenderer
             GL20.glEnableVertexAttribArray(1);
             GL20.glVertexAttribPointer(1, 2, GL11.GL_FLOAT, false, 16, 8L);
 
-            // --- 动态实例数据
-            instVbo = GL15.glGenBuffers();
-            GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, instVbo);
-            GL15.glBufferData(GL15.GL_ARRAY_BUFFER,
-                    (long) maxInstances * BYTES_PER_INSTANCE, GL15.GL_DYNAMIC_DRAW);
+            // --- 动态实例数据（双缓冲）
+            for (int k = 0; k < 2; k++)
+            {
+                instVbo[k] = GL15.glGenBuffers();
+                GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, instVbo[k]);
+                GL15.glBufferData(GL15.GL_ARRAY_BUFFER,
+                        (long) maxInstances * BYTES_PER_INSTANCE, GL15.GL_DYNAMIC_DRAW);
+            }
+            uploadIndex = 0;
+            activeVbo = 0;
 
             GL20.glEnableVertexAttribArray(2);
             GL20.glVertexAttribPointer(2, 3, GL11.GL_FLOAT, false, BYTES_PER_INSTANCE, 0L);
@@ -122,8 +132,10 @@ public final class SparkInstancedRenderer
         int maxFloats = instanceBuffer.capacity();
         int floats = Math.min(count * FLOATS_PER_INSTANCE, maxFloats);
         int chunkFloats = UPLOAD_CHUNK_INSTANCES * FLOATS_PER_INSTANCE;
+        // 写"闲置"的那个缓冲：GPU 正在读 activeVbo，不会和这次写入抢同一块显存
+        final int vbo = instVbo[uploadIndex];
 
-        GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, instVbo);
+        GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, vbo);
         try {
             for (int offset = 0; offset < floats; offset += chunkFloats) {
                 int n = Math.min(chunkFloats, floats - offset);
@@ -154,6 +166,9 @@ public final class SparkInstancedRenderer
         } finally {
             GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);
         }
+        // 上传完成之后才切换"当前绘制缓冲"；下一 tick 写另一块
+        activeVbo = uploadIndex;
+        uploadIndex ^= 1;
     }
 
     /** 一次 draw call 画完所有光点；targetW/targetH 是渲染目标像素尺寸（纹素吸附用），
@@ -200,7 +215,7 @@ public final class SparkInstancedRenderer
         GL20.glUniform1f(SparkGlProgram.uLifeFade(), lifeFade);
 
         GlStateManager._glBindVertexArray(vao);
-        GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, instVbo);
+        GlStateManager._glBindBuffer(GL15.GL_ARRAY_BUFFER, instVbo[activeVbo]);
         bindInstanceAttributes((long) firstInstance * BYTES_PER_INSTANCE);
         GL31C.glDrawArraysInstanced(GL11.GL_TRIANGLE_STRIP, 0, 4, count);
         GlStateManager._glBindVertexArray(0);

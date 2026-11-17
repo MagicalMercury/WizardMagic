@@ -288,7 +288,7 @@ public final class Shapes
         public void sample(int index, int count, ShapeParams p, long seed, double[] out)
         {
             sphereDir(seed, index, 0, out);
-            double r = p.radius() * Math.cbrt(unit(seed, index, 10));
+            double r = p.radius() * StrictMath.cbrt(unit(seed, index, 10));
             out[0] *= r;
             out[1] *= r;
             out[2] *= r;
@@ -399,8 +399,8 @@ public final class Shapes
             for (int i = 0; i < count; i++)
             {
                 double t = (i + 0.5) / count;
-                out[i * 2] = Math.pow(t, amp);
-                out[i * 2 + 1] = Math.pow(t, AXIS_POW);
+                out[i * 2] = StrictMath.pow(t, amp);
+                out[i * 2 + 1] = StrictMath.pow(t, AXIS_POW);
             }
         }
 
@@ -409,7 +409,7 @@ public final class Shapes
         {
             double t = (index + 0.5) / count;
             double r0 = p.radius() * (RADIUS_BASE_RATIO
-                    + (1.0 - RADIUS_BASE_RATIO) * Math.pow(t, p.amplitude()));
+                    + (1.0 - RADIUS_BASE_RATIO) * StrictMath.pow(t, p.amplitude()));
             if (p.radiusPulse() <= 0.0)
             {
                 return r0;
@@ -475,7 +475,7 @@ public final class Shapes
             double t = (index + 0.5) / count;
             double y = t * p.height();
             // A(y) = A_b + (A_t - A_b)·(y/H)^q
-            double axisRadius = AXIS_BASE + (p.length() - AXIS_BASE) * Math.pow(t, AXIS_POW);
+            double axisRadius = AXIS_BASE + (p.length() - AXIS_BASE) * StrictMath.pow(t, AXIS_POW);
             // k_y 按"全高多少个波"给定，φ0 由 seed 决定
             double ky = Math.PI * 2.0 * p.frequency() / Math.max(0.01, p.height());
             double phase = ky * y - p.turns() * timeSeconds + Math.PI * 2.0 * unit(seed, 0, 7);

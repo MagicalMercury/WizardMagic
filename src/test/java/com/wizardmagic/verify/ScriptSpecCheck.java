@@ -1,5 +1,6 @@
 package com.wizardmagic.verify;
 
+import com.wizardmagic.api.spell.SpellMath;
 import com.wizardmagic.core.spell.CollisionMode;
 import com.wizardmagic.core.spell.ParticleCollider;
 import com.wizardmagic.core.spell.SolidOracle;
@@ -83,6 +84,7 @@ public final class ScriptSpecCheck
             fastPathCoverage();
             bytecodeRoundTrip();
             backendEquivalence();
+            strictMathContract();
         }
         catch (Exception e)
         {
@@ -90,7 +92,8 @@ public final class ScriptSpecCheck
             System.out.println("[FAIL] 用例异常终止：" + e);
             e.printStackTrace(System.out);
         }
-        System.out.println("checks=" + checks + " failures=" + failures);
+        System.out.println("checks=" + checks + " failures=" + failures
+                + "  4通道执行次数=" + SpellScript.lanesExecutions());
         return failures;
     }
 
@@ -1380,7 +1383,39 @@ public final class ScriptSpecCheck
             long compiled = hash(SpellScript.compile("eq_" + s[0], src), false, 30);
             long interpreted = hash(SpellScript.compile("eq_" + s[0] + "_i", src), true, 30);
             check("双后端逐位一致：" + s[0], compiled == interpreted);
+
+            // stateHash 只比"量化到 1/4096 的位置"，会放过 1 ulp 与速度/能量的差异。
+            // 这里按 raw bit 比全部字段（x,y,z,vx,vy,vz,energy）——C++ 内核将来的对拍也用这条口径。
+            double[] bitsFast = snapshotAfter(SpellScript.compile("eqb_" + s[0], src), false, 30);
+            double[] bitsSlow = snapshotAfter(SpellScript.compile("eqb_" + s[0] + "_i", src), true, 30);
+            check("双后端逐位一致（raw bit）：" + s[0], sameBits(bitsFast, bitsSlow));
         }
+    }
+
+    /**
+     * 数值契约：`exp` / `pow` 必须是 fdlibm（`StrictMath`），不是平台 libm。
+     *
+     * <p>为什么钉死：实测 50 万样本里 `Math.exp` 与 `StrictMath.exp` 有 48,502 个 bit 不同、
+     * `Math.pow` 有 48,475 个。不钉住的话，将来 C++ 内核（只能用 fdlibm）和 Java 回退
+     * 会从第一步就对不上，而 `stateHash` 的 1/4096 量化经常看不出来。</p>
+     */
+    private static void strictMathContract()
+    {
+        check("exp(1) = fdlibm", sameBitsOf(num("exp(1)"), StrictMath.exp(1.0)));
+        check("exp(0.5) = fdlibm", sameBitsOf(num("exp(0.5)"), StrictMath.exp(0.5)));
+        check("exp(-700) = fdlibm（次正规）", sameBitsOf(num("exp(-700)"), StrictMath.exp(-700.0)));
+        check("exp(710) = fdlibm（溢出到 inf）", sameBitsOf(num("exp(710)"), StrictMath.exp(710.0)));
+        check("pow(2, 0.5) = fdlibm", sameBitsOf(num("pow(2, 0.5)"), StrictMath.pow(2.0, 0.5)));
+        check("pow(1.0000000000000002, 3) = fdlibm",
+                sameBitsOf(num("pow(1.0000000000000002, 3)"),
+                        StrictMath.pow(1.0000000000000002, 3.0)));
+        check("atan2(0, -1) = fdlibm", sameBitsOf(num("atan2(0, -1)"), StrictMath.atan2(0.0, -1.0)));
+        // 语言没有科学计数法字面量，1e-20 只能写成小数
+        check("atan2(1e-20, -1) = fdlibm",
+                sameBitsOf(num("atan2(0.00000000000000000001, -1)"),
+                        StrictMath.atan2(1e-20, -1.0)));
+        check("sin/cos 走 65536 项表", sameBitsOf(num("sin(1)"), SpellMath.sin(1.0))
+                && sameBitsOf(num("cos(1)"), SpellMath.cos(1.0)));
     }
 
     // ------------------------------------------------------------ 用例工具
@@ -1584,6 +1619,38 @@ public final class ScriptSpecCheck
             c.step();
         }
         return c.stateHash();
+    }
+
+    /** 跑若干步后导出全字段（x,y,z,vx,vy,vz,energy）——raw bit 对拍用 */
+    private static double[] snapshotAfter(SpellScript script, boolean interpreted, int steps)
+    {
+        SpellCloud c = cloud(script, 11L, interpreted);
+        for (int i = 0; i < steps; i++)
+        {
+            c.step();
+        }
+        return c.snapshot();
+    }
+
+    private static boolean sameBits(double[] a, double[] b)
+    {
+        if (a.length != b.length)
+        {
+            return false;
+        }
+        for (int i = 0; i < a.length; i++)
+        {
+            if (Double.doubleToRawLongBits(a[i]) != Double.doubleToRawLongBits(b[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameBitsOf(double a, double b)
+    {
+        return Double.doubleToRawLongBits(a) == Double.doubleToRawLongBits(b);
     }
 
     private static boolean sameHash(String loopBody, int steps)

@@ -120,12 +120,16 @@ final class FastProgram
         static final int KIND_LET = 0;
         /** 顶层 {@code if} 的守门条件：每步算一次，进循环前判一次 */
         static final int KIND_GUARD = 1;
+        /** 循环体内与粒子无关的任意子表达式（LICM）：靠结构键落盘 */
+        static final int KIND_EXPR = 2;
 
         int slot;
         Ast.Expr expr;
         T type;
         /** 在循环体里是第几个 {@code let}（按语句顺序编号）；读盘时靠它重新挂到语法树上 */
         int ordinal;
+        /** KIND_EXPR 的结构键（读盘时在语法树里找回同一个子表达式） */
+        String key;
         int kind = KIND_LET;
         /** 守门条件在"顶层可守门的 if"里的序号；只有 {@link #KIND_GUARD} 用 */
         int guardOrdinal = -1;
@@ -142,6 +146,8 @@ final class FastProgram
         int frameSize;
         double[] fv;
         double[] hv;
+        /** 这段指令流可以走 4 粒通道执行器（不写云级变量、无 rand、无未知指令） */
+        boolean lanes;
     }
 
     private static final Prepared[] NO_PREPARED = new Prepared[0];
@@ -152,10 +158,14 @@ final class FastProgram
      * <p><b>动 {@link RegVm} 的指令编码、寄存器分配规则，或 {@link #collectLets} 的编号顺序时
      * 必须 +1</b>：存档里的 {@code .spellc} 只认这个号，不认"长得差不多"。</p>
      */
-    static final int IR_VERSION = 6;
+    static final int IR_VERSION = 7;
 
     /** 类型序号会写进字节码缓存，<b>别重排这个枚举</b> */
     private static final T[] TYPES = T.values();
+
+    /** 循环不变子表达式外提开关：{@code -Dwizardmagic.spell.licm=0} 关闭（A/B 对照用） */
+    private static final boolean LICM =
+            !"0".equals(System.getProperty("wizardmagic.spell.licm"));
 
     private final List<Object> segments = new ArrayList<>();
     private final int loopCount;
@@ -218,7 +228,7 @@ final class FastProgram
      * <p>它是唯一<b>有状态</b>的内建：序列按执行顺序消耗。所以它只能出现在粒子循环体里
      * （那里编译成 {@code OP_RAND}，序列跟着指令走）；写在顶层标量或守卫条件里就得由解释器
      * 用<b>另一个</b> Interpreter 实例算，序号从 0 重新开始，和"整段都在解释器里跑"对不上。</p>
-     */
+     * /
     /** 一段语句里（递归）有没有 {@code call 事件()} */
     private static boolean containsCall(List<Ast.Stmt> body)
     {
@@ -555,6 +565,15 @@ final class FastProgram
                     }
                     out.writeInt(h.guardOrdinal);
                 }
+                else if (h.kind == Hoist.KIND_EXPR)
+                {
+                    if (h.key == null || h.key.isEmpty())
+                    {
+                        throw new IOException("子表达式外提缺少结构键");
+                    }
+                    out.writeInt(0);
+                    out.writeUTF(h.key);
+                }
                 else
                 {
                     if (h.ordinal < 0)
@@ -752,6 +771,7 @@ final class FastProgram
         {
             int kind = in.readByte();
             int id = in.readInt();
+            String exprKey = kind == Hoist.KIND_EXPR ? in.readUTF() : null;
             int slot = in.readInt();
             int typeId = in.readByte();
             if (typeId < 0 || typeId >= TYPES.length || slot < 0 || slot >= MAX_REGS)
@@ -782,6 +802,17 @@ final class FastProgram
                 }
                 h.ordinal = id;
                 h.expr = lets.get(id).value();
+            }
+            else if (kind == Hoist.KIND_EXPR)
+            {
+                Ast.Expr expr = findExpr(loop.body(), exprKey);
+                if (expr == null)
+                {
+                    return null;
+                }
+                h.kind = Hoist.KIND_EXPR;
+                h.key = exprKey;
+                h.expr = expr;
             }
             else
             {
@@ -910,13 +941,24 @@ final class FastProgram
         int li = 0;
         // 同一步里可能有多个循环：rand() 的序列要接着上一条往下数（与解释器一致）
         int randSeq = 0;
+        boolean lanes = parallelSafe;
         for (Object seg : segments)
         {
             if (seg instanceof Loop)
             {
                 Prepared p = step.prepared[li++];
-                randSeq = RegVm.execute(p.code, p.pos, p.consts, new double[p.frameSize], p.fv, p.hv,
-                        cloud, from, to, step.time, randSeq);
+                if (lanes && p.lanes)
+                {
+                    // 4 粒通道：同一指令流一次分派，4 条 lane 各执行一遍（逐位一致）
+                    RegVm4.execute(p.code, p.pos, p.consts,
+                            new double[p.frameSize * RegVm4.LANES],
+                            p.fv, p.hv, cloud, from, to, step.time);
+                }
+                else
+                {
+                    randSeq = RegVm.execute(p.code, p.pos, p.consts, new double[p.frameSize],
+                            p.fv, p.hv, cloud, from, to, step.time, randSeq);
+                }
             }
         }
     }
@@ -1021,6 +1063,7 @@ final class FastProgram
                 p.hv[h.slot + 2] = x.z();
             }
         }
+        p.lanes = RegVm4.supported(p.code);
         return p;
     }
 
@@ -1517,6 +1560,123 @@ final class FastProgram
         return false;
     }
 
+    /** 子表达式的结构键：只由"运算符/名字/字面量位模式"决定，编译期与读盘时一致 */
+    private static String exprKey(Ast.Expr e)
+    {
+        if (e instanceof Ast.NumLit n)
+        {
+            return "n" + Double.doubleToRawLongBits(n.v());
+        }
+        if (e instanceof Ast.BoolLit b)
+        {
+            return b.v() ? "t" : "f";
+        }
+        if (e instanceof Ast.Var v)
+        {
+            return "v" + v.name();
+        }
+        if (e instanceof Ast.Member m)
+        {
+            return "m" + m.name() + "(" + exprKey(m.base()) + ")";
+        }
+        if (e instanceof Ast.Unary u)
+        {
+            return "u" + u.op() + "(" + exprKey(u.e()) + ")";
+        }
+        if (e instanceof Ast.Binary b)
+        {
+            return "b" + b.op() + "(" + exprKey(b.a()) + "," + exprKey(b.b()) + ")";
+        }
+        if (e instanceof Ast.Call c)
+        {
+            StringBuilder sb = new StringBuilder("c").append(c.fn()).append('(');
+            for (Ast.Expr arg : c.args())
+            {
+                sb.append(exprKey(arg)).append(',');
+            }
+            return sb.append(')').toString();
+        }
+        return "?";
+    }
+
+    /** 读盘用：在语法树里按结构键找回子表达式 */
+    private static Ast.Expr findExpr(List<Ast.Stmt> body, String key)
+    {
+        for (Ast.Stmt s : body)
+        {
+            Ast.Expr e = findExpr(s, key);
+            if (e != null)
+            {
+                return e;
+            }
+        }
+        return null;
+    }
+
+    private static Ast.Expr findExpr(Ast.Stmt s, String key)
+    {
+        if (s instanceof Ast.Let let)
+        {
+            return findExpr(let.value(), key);
+        }
+        if (s instanceof Ast.Assign a)
+        {
+            return findExpr(a.value(), key);
+        }
+        if (s instanceof Ast.If branch)
+        {
+            Ast.Expr e = findExpr(branch.cond(), key);
+            if (e != null)
+            {
+                return e;
+            }
+            e = findExpr(branch.then(), key);
+            return e != null ? e : findExpr(branch.otherwise(), key);
+        }
+        if (s instanceof Ast.ExprStmt es)
+        {
+            return findExpr(es.expr(), key);
+        }
+        if (s instanceof Ast.ForParticles loop)
+        {
+            return findExpr(loop.body(), key);
+        }
+        return null;
+    }
+
+    private static Ast.Expr findExpr(Ast.Expr e, String key)
+    {
+        if (exprKey(e).equals(key))
+        {
+            return e;
+        }
+        if (e instanceof Ast.Member m)
+        {
+            return findExpr(m.base(), key);
+        }
+        if (e instanceof Ast.Unary u)
+        {
+            return findExpr(u.e(), key);
+        }
+        if (e instanceof Ast.Binary b)
+        {
+            Ast.Expr x = findExpr(b.a(), key);
+            return x != null ? x : findExpr(b.b(), key);
+        }
+        if (e instanceof Ast.Call c)
+        {
+            for (Ast.Expr arg : c.args())
+            {
+                Ast.Expr x = findExpr(arg, key);
+                if (x != null)
+                {
+                    return x;
+                }
+            }
+        }
+        return null;
+    }
+
     private static T particlePropType(String name)
     {
         switch (name)
@@ -1654,6 +1814,18 @@ final class FastProgram
         /** 在 if 分支里的语句不参与外提（避免把可能抛错/不该执行的计算提前） */
         private int ifDepth;
 
+        // ---- 粒子帧：pos / v / anchor 在循环开头各加载一次，body 内直接引用 ----
+        /** pos 的固定槽（-1 = 不缓存；每次读都发 LPOS） */
+        private int framePos = -1;
+        private int frameVel = -1;
+        private int frameAnchor = -1;
+        /** 只读自由变量（dt/time/life…）的固定槽：整步不变，循环开头从 fv 搬一次 */
+        private final Map<String, Integer> freeFrame = new HashMap<>();
+        /** 循环不变子表达式（LICM）：结构键 → hv 槽 */
+        private final Map<String, Integer> hoistKeys = new HashMap<>();
+        /** 循环体里被赋过值的自由变量名：这些名字不能参与外提（值在 body 内会变） */
+        private java.util.Set<String> writtenVars = java.util.Set.of();
+
         Codegen(Loop loop, Scope top, java.util.Set<String> writable)
         {
             this.loop = loop;
@@ -1670,6 +1842,7 @@ final class FastProgram
             }
             Scope sc = new Scope(top, null);
             sc.declare(varName, T.PARTICLE, -1);
+            Usage use = analyze(body, varName);
             // 顶层 if 的守卫：每步算过一次（在 hv 里），这里每条粒子判一下再进循环体
             int guardSkip = -1;
             if (loop.guardSlot >= 0)
@@ -1681,9 +1854,43 @@ final class FastProgram
                 // 守卫寄存器用完即弃：循环体从 0 号槽重新开始分
                 nextReg = 0;
             }
+
+            // 粒子帧：读两次以上的属性、以及会被写的属性，装一次到固定槽。
+            // 必须放在守卫之后——守卫为假时连加载都跳过。
+            // p.local 的语义是"当前位置 - 原点"：如果 pos 会被写，帧里延迟写回会让 local
+            // 读到旧值，这种组合直接退回逐次读写（语义优先，不猜）。
+            boolean posFrameOk = !(use.localRead > 0 && use.posWrite);
+            if (posFrameOk && (use.posWrite || use.posReads >= 2))
+            {
+                framePos = alloc(T.VEC3);
+                emit1(OP_LPOS, framePos);
+            }
+            if (use.velWrite || use.velReads >= 2)
+            {
+                frameVel = alloc(T.VEC3);
+                emit1(OP_LVEL, frameVel);
+            }
+            if (use.anchorReads >= 2)
+            {
+                frameAnchor = alloc(T.VEC3);
+                emit1(OP_LANCHOR, frameAnchor);
+            }
+            // 只读自由变量：整步不变，循环开头从 fv 搬进寄存器，body 里直接引用
+            preloadFrees(body);
+
             for (Ast.Stmt s : body)
             {
                 stmt(s, sc);
+            }
+            // 统一写回：粒子循环体内部没有观察者（世界查询 / hurt / emit 都被禁止），
+            // 所以"整段末尾写一次"与"每次赋值立即写"对下一步的可见状态完全等价。
+            if (framePos >= 0 && use.posWrite)
+            {
+                emit1(OP_SPOS, framePos);
+            }
+            if (frameVel >= 0 && use.velWrite)
+            {
+                emit1(OP_SVEL, frameVel);
             }
             if (guardSkip >= 0)
             {
@@ -1698,6 +1905,447 @@ final class FastProgram
                 System.err.println("[script] 循环体：寄存器 " + maxReg + "，指令流 " + code.size()
                         + " 个 int，外提 " + loop.hoists.size() + "，自由变量 " + loop.frees.size());
             }
+        }
+
+        // ------------------------------------------------ 粒子属性使用统计
+
+        /** 循环体对粒子属性的读写次数（只用来决定要不要建帧） */
+        private static final class Usage
+        {
+            int posReads;
+            int velReads;
+            int anchorReads;
+            int localRead;
+            boolean posWrite;
+            boolean velWrite;
+        }
+
+        private static Usage analyze(List<Ast.Stmt> body, String varName)
+        {
+            Usage u = new Usage();
+            for (Ast.Stmt s : body)
+            {
+                scanStmt(s, varName, u);
+            }
+            return u;
+        }
+
+        private static void scanStmt(Ast.Stmt s, String varName, Usage u)
+        {
+            if (s instanceof Ast.Let let)
+            {
+                scanExpr(let.value(), varName, u);
+                return;
+            }
+            if (s instanceof Ast.Assign a)
+            {
+                if (a.base().equals(varName) && !a.path().isEmpty())
+                {
+                    String prop = a.path().get(0);
+                    if (prop.equals("pos"))
+                    {
+                        u.posWrite = true;
+                    }
+                    else if (prop.equals("v"))
+                    {
+                        u.velWrite = true;
+                    }
+                }
+                scanExpr(a.value(), varName, u);
+                return;
+            }
+            if (s instanceof Ast.If branch)
+            {
+                scanExpr(branch.cond(), varName, u);
+                for (Ast.Stmt x : branch.then())
+                {
+                    scanStmt(x, varName, u);
+                }
+                for (Ast.Stmt x : branch.otherwise())
+                {
+                    scanStmt(x, varName, u);
+                }
+                return;
+            }
+            if (s instanceof Ast.ExprStmt es)
+            {
+                scanExpr(es.expr(), varName, u);
+            }
+        }
+
+        private static void scanExpr(Ast.Expr e, String varName, Usage u)
+        {
+            if (e instanceof Ast.Member m)
+            {
+                // 只统计最内层粒子属性：p.pos.x 只算一次 pos 读
+                if (m.base() instanceof Ast.Var v && v.name().equals(varName))
+                {
+                    switch (m.name())
+                    {
+                        case "pos": u.posReads++; break;
+                        case "v": u.velReads++; break;
+                        case "anchor": u.anchorReads++; break;
+                        case "local": u.localRead++; break;
+                        default: break;
+                    }
+                    return;
+                }
+                scanExpr(m.base(), varName, u);
+                return;
+            }
+            if (e instanceof Ast.Call c)
+            {
+                for (Ast.Expr arg : c.args())
+                {
+                    scanExpr(arg, varName, u);
+                }
+                return;
+            }
+            if (e instanceof Ast.Unary un)
+            {
+                scanExpr(un.e(), varName, u);
+                return;
+            }
+            if (e instanceof Ast.Binary b)
+            {
+                scanExpr(b.a(), varName, u);
+                scanExpr(b.b(), varName, u);
+                return;
+            }
+            if (e instanceof Ast.RecordLit r)
+            {
+                for (Ast.Expr v : r.fields().values())
+                {
+                    scanExpr(v, varName, u);
+                }
+            }
+        }
+
+        /** 这个属性当前有没有帧寄存器；没有返回 -1 */
+        private int framedProp(String prop)
+        {
+            return switch (prop)
+            {
+                case "pos" -> framePos;
+                case "v" -> frameVel;
+                case "anchor" -> frameAnchor;
+                default -> -1;
+            };
+        }
+
+        /**
+         * 把循环体里用到的、整步不变的只读自由变量搬进固定寄存器。
+         *
+         * <p>{@code dt / time / life / step} 这些在一步之内对每颗粒子都是同一个值，
+         * 但原来的代码每粒都发一条 {@code LDF}。这里在循环开头各装一次，body 里直接引用。
+         * 会被赋值的名字（云级变量）不搬——它们的值在 body 内会变，必须走 fv。</p>
+         */
+        private void preloadFrees(List<Ast.Stmt> body)
+        {
+            java.util.Set<String> used = new java.util.LinkedHashSet<>();
+            java.util.Set<String> declared = new java.util.LinkedHashSet<>();
+            java.util.Set<String> assigned = new java.util.LinkedHashSet<>();
+            for (Ast.Stmt s : body)
+            {
+                collectVarNames(s, used, declared, assigned);
+            }
+            writtenVars = assigned;
+            for (String name : used)
+            {
+                if (declared.contains(name) || assigned.contains(name))
+                {
+                    continue;
+                }
+                T t = top.type(name);
+                // bool / element 没有 fv 表示；只在 num / vec3 上做
+                if (t != T.NUM && t != T.VEC3)
+                {
+                    continue;
+                }
+                Free f = free(name, t);
+                int reg = alloc(t);
+                emit2(t == T.VEC3 ? OP_LDF3 : OP_LDF1, reg, f.offset);
+                freeFrame.put(name, reg);
+            }
+        }
+
+        private static void collectVarNames(Ast.Stmt s, java.util.Set<String> used,
+                                            java.util.Set<String> declared,
+                                            java.util.Set<String> assigned)
+        {
+            if (s instanceof Ast.Let let)
+            {
+                declared.add(let.name());
+                collectExprNames(let.value(), used);
+                return;
+            }
+            if (s instanceof Ast.Assign a)
+            {
+                if (a.path().isEmpty())
+                {
+                    assigned.add(a.base());
+                }
+                collectExprNames(a.value(), used);
+                return;
+            }
+            if (s instanceof Ast.If branch)
+            {
+                collectExprNames(branch.cond(), used);
+                for (Ast.Stmt x : branch.then())
+                {
+                    collectVarNames(x, used, declared, assigned);
+                }
+                for (Ast.Stmt x : branch.otherwise())
+                {
+                    collectVarNames(x, used, declared, assigned);
+                }
+                return;
+            }
+            if (s instanceof Ast.ExprStmt es)
+            {
+                collectExprNames(es.expr(), used);
+            }
+        }
+
+        private static void collectExprNames(Ast.Expr e, java.util.Set<String> used)
+        {
+            if (e instanceof Ast.Var v)
+            {
+                used.add(v.name());
+                return;
+            }
+            if (e instanceof Ast.Member m)
+            {
+                collectExprNames(m.base(), used);
+                return;
+            }
+            if (e instanceof Ast.Call c)
+            {
+                for (Ast.Expr arg : c.args())
+                {
+                    collectExprNames(arg, used);
+                }
+                return;
+            }
+            if (e instanceof Ast.Unary u)
+            {
+                collectExprNames(u.e(), used);
+                return;
+            }
+            if (e instanceof Ast.Binary b)
+            {
+                collectExprNames(b.a(), used);
+                collectExprNames(b.b(), used);
+                return;
+            }
+            if (e instanceof Ast.RecordLit r)
+            {
+                for (Ast.Expr v : r.fields().values())
+                {
+                    collectExprNames(v, used);
+                }
+            }
+        }
+
+        /**
+         * 表达式是否已经"现成"在某个寄存器里：粒子帧、let 槽位、vec3 分量。
+         *
+         * <p>返回 -1 表示必须走 {@link #expr} 现算。调用方（二元运算、函数实参）
+         * 可以直接把返回的槽当成源操作数，省掉一次 MOV。</p>
+         */
+        private int preloaded(Ast.Expr e, Scope sc)
+        {
+            if (e instanceof Ast.Var v)
+            {
+                Integer frame = freeFrame.get(v.name());
+                if (frame != null)
+                {
+                    return frame;
+                }
+                Integer slot = sc.slot(v.name());
+                return slot == null ? -1 : slot;
+            }
+            if (e instanceof Ast.Member m)
+            {
+                if (m.base() instanceof Ast.Var v && typeOf(v, sc) == T.PARTICLE)
+                {
+                    return framedProp(m.name());
+                }
+                if (typeOf(m.base(), sc) == T.VEC3)
+                {
+                    int base = preloaded(m.base(), sc);
+                    int k = component(m.name());
+                    return base >= 0 && k >= 0 ? base + k : -1;
+                }
+            }
+            return -1;
+        }
+
+        /** 取一个操作数：能直取就直取，否则分配临时槽并求值 */
+        private int operand(Ast.Expr e, Scope sc)
+        {
+            int pre = preloaded(e, sc);
+            if (pre >= 0)
+            {
+                return pre;
+            }
+            int s = alloc(typeOf(e, sc));
+            expr(e, sc, s);
+            return s;
+        }
+
+        /** 这个表达式能不能外提到"每步一次"（与粒子无关、不会抛错、不读 body 内会改的变量） */
+        private boolean hoistable(Ast.Expr e, Scope sc)
+        {
+            boolean compound = e instanceof Ast.Binary || e instanceof Ast.Unary
+                    || (e instanceof Ast.Call c && !c.fn().equals("rand")
+                        && !c.fn().equals("gravity") && !c.fn().equals("volatility"));
+            if (!compound || !independent(e, sc) || !safeToHoist(e) || mentionsWritten(e))
+            {
+                return false;
+            }
+            T t = typeOf(e, sc);
+            return t == T.NUM || t == T.BOOL || t == T.VEC3;
+        }
+
+        /** 除法/取模会抛错：提出循环会改变"什么情况下报错"，所以不外提 */
+        private static boolean safeToHoist(Ast.Expr e)
+        {
+            if (e instanceof Ast.Binary b)
+            {
+                if (b.op().equals("/") || b.op().equals("%"))
+                {
+                    return false;
+                }
+                return safeToHoist(b.a()) && safeToHoist(b.b());
+            }
+            if (e instanceof Ast.Unary u)
+            {
+                return safeToHoist(u.e());
+            }
+            if (e instanceof Ast.Member m)
+            {
+                return safeToHoist(m.base());
+            }
+            if (e instanceof Ast.Call c)
+            {
+                for (Ast.Expr arg : c.args())
+                {
+                    if (!safeToHoist(arg))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        /** 表达式里是否引用了循环体内会被写的变量 */
+        private boolean mentionsWritten(Ast.Expr e)
+        {
+            if (writtenVars.isEmpty())
+            {
+                return false;
+            }
+            if (e instanceof Ast.Var v)
+            {
+                return writtenVars.contains(v.name());
+            }
+            if (e instanceof Ast.Member m)
+            {
+                return mentionsWritten(m.base());
+            }
+            if (e instanceof Ast.Unary u)
+            {
+                return mentionsWritten(u.e());
+            }
+            if (e instanceof Ast.Binary b)
+            {
+                return mentionsWritten(b.a()) || mentionsWritten(b.b());
+            }
+            if (e instanceof Ast.Call c)
+            {
+                for (Ast.Expr arg : c.args())
+                {
+                    if (mentionsWritten(arg))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /** 取（或新建）一个外提槽；返回 -1 = 槽位不够，放弃外提 */
+        private int hoistExpr(Ast.Expr e, Scope sc)
+        {
+            String key = exprKey(e);
+            Integer old = hoistKeys.get(key);
+            if (old != null)
+            {
+                return old;
+            }
+            T t = typeOf(e, sc);
+            int w = width(t);
+            if (loop.hoistSlots + w > MAX_REGS)
+            {
+                return -1;
+            }
+            Hoist h = new Hoist();
+            h.kind = Hoist.KIND_EXPR;
+            h.key = key;
+            h.slot = loop.hoistSlots;
+            loop.hoistSlots += w;
+            h.expr = e;
+            h.type = t;
+            h.ordinal = -1;
+            loop.hoists.add(h);
+            hoistKeys.put(key, h.slot);
+            return h.slot;
+        }
+
+        /** 表达式里是否读了粒子属性 {@code prop}（含 p.prop.x） */
+        private static boolean readsParticleProp(Ast.Expr e, String prop, Scope sc)
+        {
+            if (e instanceof Ast.Member m)
+            {
+                if (m.name().equals(prop) && m.base() instanceof Ast.Var v
+                        && sc.type(v.name()) == T.PARTICLE)
+                {
+                    return true;
+                }
+                return readsParticleProp(m.base(), prop, sc);
+            }
+            if (e instanceof Ast.Binary b)
+            {
+                return readsParticleProp(b.a(), prop, sc) || readsParticleProp(b.b(), prop, sc);
+            }
+            if (e instanceof Ast.Unary u)
+            {
+                return readsParticleProp(u.e(), prop, sc);
+            }
+            if (e instanceof Ast.Call c)
+            {
+                for (Ast.Expr arg : c.args())
+                {
+                    if (readsParticleProp(arg, prop, sc))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (e instanceof Ast.RecordLit r)
+            {
+                for (Ast.Expr v : r.fields().values())
+                {
+                    if (readsParticleProp(v, prop, sc))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         // ------------------------------------------------ 语句
@@ -1890,19 +2538,28 @@ final class FastProgram
                 {
                     throw new Unsupported("pos / v 的分量只能赋 num");
                 }
-                int dst = alloc(T.NUM);
+                int k = component(comp);
+                int framedBase = framedProp(prop);
+                int dst = framedBase >= 0 ? framedBase + k : alloc(T.NUM);
                 if (a.op().isEmpty())
                 {
                     expr(a.value(), sc, dst);
                 }
                 else
                 {
-                    emitLoadComponent(prop, comp, dst);
+                    // 帧里已经是当前值，不用再从粒子读一次
+                    if (framedBase < 0)
+                    {
+                        emitLoadComponent(prop, comp, dst);
+                    }
                     int t = alloc(T.NUM);
                     expr(a.value(), sc, t);
                     binaryOp(a.op(), T.NUM, rhs, dst, dst, t);
                 }
-                emitStoreComponent(prop, comp, dst);
+                if (framedBase < 0)
+                {
+                    emitStoreComponent(prop, comp, dst);
+                }
                 nextReg = mark;
                 return;
             }
@@ -1910,28 +2567,51 @@ final class FastProgram
             // p.pos / p.v / p.energy
             String prop = a.path().get(0);
             T pt = particlePropType(prop);
-            int dst = alloc(pt);
+            // 只有 pos / v 会建帧；anchor 只读，energy 是 float（帧里存 double 会绕过截断）
+            int framed = prop.equals("pos") || prop.equals("v") ? framedProp(prop) : -1;
+            int dst = framed >= 0 ? framed : alloc(pt);
             if (a.op().isEmpty())
             {
                 if (pt != rhs)
                 {
                     throw new Unsupported("给粒子属性赋的值类型不对");
                 }
-                expr(a.value(), sc, dst);
+                // vec 字面量是"边求值边写 dst 的连续槽"；如果实参还读同一个帧，
+                // 先算进临时槽再整体搬，避免覆盖源分量
+                boolean aliasVec = framed >= 0 && pt == T.VEC3
+                        && a.value() instanceof Ast.Call c
+                        && c.fn().equals("vec")
+                        && readsParticleProp(c, prop, sc);
+                if (aliasVec)
+                {
+                    int tmp = alloc(pt);
+                    expr(a.value(), sc, tmp);
+                    emit2(OP_MOV3, dst, tmp);
+                }
+                else
+                {
+                    expr(a.value(), sc, dst);
+                }
             }
             else
             {
-                emitLoadProp(prop, dst);
+                if (framed < 0)
+                {
+                    emitLoadProp(prop, dst);
+                }
                 int t = alloc(rhs);
                 expr(a.value(), sc, t);
                 binaryOp(a.op(), pt, rhs, dst, dst, t);
             }
-            switch (prop)
+            if (framed < 0)
             {
-                case "pos": emit1(OP_SPOS, dst); break;
-                case "v": emit1(OP_SVEL, dst); break;
-                case "energy": emit1(OP_SENERGY, dst); break;
-                default: throw new Unsupported("不认识的粒子属性");
+                switch (prop)
+                {
+                    case "pos": emit1(OP_SPOS, dst); break;
+                    case "v": emit1(OP_SVEL, dst); break;
+                    case "energy": emit1(OP_SENERGY, dst); break;
+                    default: throw new Unsupported("不认识的粒子属性");
+                }
             }
             nextReg = mark;
         }
@@ -1940,6 +2620,26 @@ final class FastProgram
 
         private void expr(Ast.Expr e, Scope sc, int dst)
         {
+            // 已经在槽里的值（粒子帧 / let / vec3 分量）直接搬，或干脆不搬
+            int pre = preloaded(e, sc);
+            if (pre >= 0)
+            {
+                if (pre != dst)
+                {
+                    emit2(typeOf(e, sc) == T.VEC3 ? OP_MOV3 : OP_MOV, dst, pre);
+                }
+                return;
+            }
+            // 循环不变子表达式：每步算一次，粒子循环里只读 hv
+            if (LICM && hoistable(e, sc))
+            {
+                int slot = hoistExpr(e, sc);
+                if (slot >= 0)
+                {
+                    emit2(typeOf(e, sc) == T.VEC3 ? OP_LDH3 : OP_LDH1, dst, slot);
+                    return;
+                }
+            }
             if (e instanceof Ast.NumLit n)
             {
                 emitConst(n.v(), dst);
@@ -1993,8 +2693,7 @@ final class FastProgram
                 }
                 int mark = nextReg;
                 T t = typeOf(u.e(), sc);
-                int a = alloc(t);
-                expr(u.e(), sc, a);
+                int a = operand(u.e(), sc);
                 emit2(t == T.VEC3 ? OP_NEG_V : OP_NEG_N, dst, a);
                 nextReg = mark;
                 return;
@@ -2017,10 +2716,8 @@ final class FastProgram
                 T a = typeOf(b.a(), sc);
                 T c = typeOf(b.b(), sc);
                 int mark = nextReg;
-                int sa = alloc(a);
-                expr(b.a(), sc, sa);
-                int sb = alloc(c);
-                expr(b.b(), sc, sb);
+                int sa = operand(b.a(), sc);
+                int sb = operand(b.b(), sc);
                 binaryOp(b.op(), a, c, dst, sa, sb);
                 nextReg = mark;
                 return;
@@ -2126,9 +2823,7 @@ final class FastProgram
             int[] src = new int[args.size()];
             for (int j = 0; j < src.length; j++)
             {
-                Ast.Expr arg = args.get(j);
-                src[j] = alloc(typeOf(arg, sc));
-                expr(arg, sc, src[j]);
+                src[j] = operand(args.get(j), sc);
             }
             // 头两个源进打包字，多出来的（clamp/smoothstep/lerp 的第 3 个、noise 的第 3、4 个）
             // 跟在后面当独立 int
@@ -2276,6 +2971,13 @@ final class FastProgram
 
         private void emitConst(double v, int dst)
         {
+            code.add(word(OP_LDK, dst, 0, 0));
+            code.add(constSlot(v));
+        }
+
+        /** 常量表里这个 double 的下标（按原始位模式去重） */
+        private int constSlot(double v)
+        {
             long bits = Double.doubleToRawLongBits(v);
             Integer k = constIndex.get(bits);
             if (k == null)
@@ -2283,8 +2985,7 @@ final class FastProgram
                 k = consts.add(v);
                 constIndex.put(bits, k);
             }
-            code.add(word(OP_LDK, dst, 0, 0));
-            code.add(k);
+            return k;
         }
 
         private void emitFree(String name, T t, int dst)

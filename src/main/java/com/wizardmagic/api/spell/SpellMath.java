@@ -27,7 +27,9 @@ public final class SpellMath
     {
         for (int i = 0; i < 65536; i++)
         {
-            SIN[i] = (float) Math.sin((double) i * Math.PI * 2.0 / 65536.0);
+            // StrictMath.sin 是 JLS 保证"跨平台逐位相同"的 fdlibm；Math.sin 是平台 libm。
+            // 表一旦不一致，所有形状采样都会跟着漂，所以这里必须用 StrictMath。
+            SIN[i] = (float) StrictMath.sin((double) i * Math.PI * 2.0 / 65536.0);
         }
     }
 

@@ -944,7 +944,8 @@ public final class Interpreter
             }
             case "sin": return Value.num(SpellMath.sin(num(one(args, env, c), c)));
             case "cos": return Value.num(SpellMath.cos(num(one(args, env, c), c)));
-            case "exp": return Value.num(Math.exp(num(one(args, env, c), c)));
+            // 与 RegVm 同步：解释器是对拍基准，两边必须用同一套（fdlibm/StrictMath）
+            case "exp": return Value.num(StrictMath.exp(num(one(args, env, c), c)));
             case "floor": return Value.num(Math.floor(num(one(args, env, c), c)));
             case "round": return Value.num(Math.round(num(one(args, env, c), c)));
             case "rand":
