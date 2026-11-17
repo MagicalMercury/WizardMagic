@@ -502,6 +502,7 @@ int main()
             { "3x NOISE + JZ（无 SCALE，真分歧）", 0, 3, true, true, false },
             { "20 SCALE + 3 NOISE（无分支：frost_nova 的形状）", 20, 3, false, false, false },
             { "全混 20 SCALE + 3 NOISE + JZ（条件全真：firestorm 常态）", 20, 3, true, false, false },
+            { "全混 20 SCALE + 3 NOISE + SELECT（条件全真）", 20, 3, false, false, true },
             { "全混 20 SCALE + 3 NOISE + JZ（真分歧）", 20, 3, true, true, false },
             { "全混 … + SELECT（if-converted，真分歧）", 20, 3, false, true, true },
         };
