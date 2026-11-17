@@ -155,6 +155,8 @@ public final class SpellScripts
         hits = 0;
         rewrites = 0;
         CACHE.clear();
+        // 启动时报一次"脚本跑在哪个后端"：玩家机上看不到自检，这行日志是唯一凭据
+        LOGGER.info("[wizardmagic] 脚本后端：{}", com.wizardmagic.core.spell.script.NativeVm.describe());
         if (!storageReady)
         {
             try

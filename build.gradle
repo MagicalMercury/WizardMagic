@@ -203,7 +203,101 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-// ------------------------------------------------ 离机自检（不启动 Minecraft）
+// ------------------------------------------------ 原生内核（CMake）
+//
+// 单独构建，不挂在 build 上：`gradlew compileNative` / `nativeSelftest` 才跑。
+// cmake 与编译器都从 PATH 里找（MSYS2 UCRT64 已经在 PATH 上），不写死任何安装路径，
+// 也不覆盖 environment —— CI（ubuntu）用系统的 g++/cmake 就能编。
+//   gradlew compileNative     配置 + 编译（build-native/）
+//   gradlew nativeSelftest    编译 + 跑离机对拍（ctest）
+def nativeRoot  = file('src/main/native')
+def nativeBuild = layout.projectDirectory.dir('build-native')
+def osName      = org.gradle.internal.os.OperatingSystem.current()
+def generator   = osName.isWindows() ? 'MinGW Makefiles' : 'Unix Makefiles'
+// JNI 头由 toolchain 解析，不写死 JDK 安装路径
+def jdk17Home   = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+                        .get().metadata.installationPath.asFile.absolutePath
+def cmakeArgs   = ['cmake', '-S', nativeRoot.absolutePath, '-B', nativeBuild.asFile.absolutePath,
+                   '-G', generator, '-DCMAKE_BUILD_TYPE=Release', "-DWMVM_JDK=${jdk17Home}".toString()]
+if (osName.isWindows()) {
+    cmakeArgs += '-DCMAKE_CXX_COMPILER=g++'   // 只给名字，从 PATH 解析
+}
+
+tasks.register('configureNative', Exec) {
+    group = 'native'
+    description = 'CMake 配置原生代码（build-native/）'
+    onlyIf { nativeRoot.exists() }
+    commandLine cmakeArgs
+}
+
+tasks.register('compileNative', Exec) {
+    group = 'native'
+    description = '编译原生库与离机自检（build-native/）'
+    dependsOn 'configureNative'
+    commandLine 'cmake', '--build', nativeBuild.asFile.absolutePath, '--parallel', '8'
+}
+
+tasks.register('nativeSelftest', Exec) {
+    group = 'native'
+    description = '跑原生内核对拍（与 Java 实测常量比 raw bit）'
+    dependsOn 'compileNative'
+    commandLine 'ctest', '--test-dir', nativeBuild.asFile.absolutePath, '--output-on-failure'
+}
+
+// JNI 冒烟：把编译好的 DLL 路径喂给 Java，验证"能加载 + 能跑 + 错误码能回"。
+// 没有 DLL（没装 MSYS2 的机器 / CI）就 SKIPPED，不影响 build。
+tasks.register('spellNativeCheck', JavaExec) {
+    group = 'verification'
+    description = '原生内核 JNI 冒烟测试（没有 DLL 时自动跳过）'
+    dependsOn 'compileNative'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.NativeVmCheck'
+    def lib = nativeBuild.file('wmvm/wmvm.dll').asFile
+    systemProperty 'wizardmagic.native.library', lib.absolutePath
+    systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
+    onlyIf { lib.exists() }
+}
+
+// 原生库进资源：先 `gradlew compileNative`，之后 processResources 会把它带进
+// build/resources/main —— `runClient` 与打出来的 jar 就用得上。
+// 没有 DLL 时这一行什么都不做（也不触发 CMake），CI 不受影响。
+tasks.named('processResources', ProcessResources).configure {
+    mustRunAfter 'compileNative'   // 保证复制的时候 DLL 已经编好了
+    from(layout.projectDirectory.dir('build-native/wmvm')) {
+        include 'wmvm.dll'
+        into 'wizardmagic/native/windows/x86_64'
+    }
+}
+
+// 开发时一条命令就能带着原生库进游戏（build 不受影响：CI 不会因为 CMake 变红）
+// runClient 由 ForgeGradle 晚注册，所以用 matching 而不是 named
+tasks.matching { it.name == 'runClient' }.configureEach {
+    dependsOn 'compileNative'
+}
+
+// 验证"游戏里那条加载路径"（从 classpath 抽出来 System.load），**不设** -Dwizardmagic.native.library
+tasks.register('spellNativeResourceCheck', JavaExec) {
+    group = 'verification'
+    description = '从 build/resources/main 里加载原生库（模拟游戏内路径）'
+    dependsOn 'processResources'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.NativeVmCheck'
+    systemProperty 'wizardmagic.native.mustLoad', '1'
+    systemProperty 'wizardmagic.spell.lanes', '0'
+    onlyIf { nativeBuild.file('wmvm/wmvm.dll').asFile.exists() }
+}
+
+tasks.register('spellParityCheck', JavaExec) {
+    group = 'verification'
+    description = '原生内核 vs Java 后端：整段逐位对拍（没有 DLL 时自动跳过）'
+    dependsOn 'compileNative'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.NativeVmParity'
+    def lib = nativeBuild.file('wmvm/wmvm.dll').asFile
+    systemProperty 'wizardmagic.native.library', lib.absolutePath
+    systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
+    onlyIf { lib.exists() }
+}// ------------------------------------------------ 离机自检（不启动 Minecraft）
 //
 // 两个入口都是普通 main()，不依赖 JUnit，避免给 mod 引入测试依赖。
 //   gradlew spellCheck        门禁：脚本语言 + 粒子层，跳过性能测量（build 时自动跑）

@@ -46,4 +46,14 @@ public final class SpellMath
     {
         return SIN[(int) ((float) radians * INDEX_SCALE + 16384.0F) & 65535];
     }
+
+    /**
+     * 整张表的快照（原生内核要用同一张表，否则 sin/cos 的末位会分叉）。
+     *
+     * <p>只有 {@code NativeVm} 初始化时取一次；256 KB 的一次性拷贝，不进热路径。</p>
+     */
+    public static float[] sinTableSnapshot()
+    {
+        return SIN.clone();
+    }
 }

@@ -47,6 +47,36 @@ final class RegVm
         return (op << 24) | ((dst & FIELD) << DST_SHIFT) | ((a & FIELD) << A_SHIFT) | (b & FIELD);
     }
 
+    /**
+     * 这条指令占几个 int。
+     *
+     * <p>多字指令自己带后续词：{@code LDK}（常量下标）、{@code JZ/JMP/JNZ}（目标）、
+     * 三元数学、{@code TANGENT_UP/RADIAL_UP/ROTATE}（第三参），{@code NOISE} 带两个字。
+     * 扫描指令流（原生内核要预计算什么、能不能走 4 通道）必须用同一份。</p>
+     */
+    static int length(int op)
+    {
+        switch (op)
+        {
+            case OP_LDK:
+            case OP_JZ:
+            case OP_JMP:
+            case OP_JNZ:
+            case OP_CLAMP:
+            case OP_SMOOTHSTEP:
+            case OP_LERP_N:
+            case OP_LERP_V:
+            case OP_TANGENT_UP:
+            case OP_RADIAL_UP:
+            case OP_ROTATE:
+                return 2;
+            case OP_NOISE:
+                return 3;
+            default:
+                return 1;
+        }
+    }
+
     // ---------------------------------------------------------------- 取数
 
     /** [LDK|d][k] d ← k[k] */

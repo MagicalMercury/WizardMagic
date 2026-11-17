@@ -96,6 +96,14 @@ final class FastProgram
         int guardSlot = -1;
         /** true = 循环在 {@code else} 分支里（条件为假时才跑） */
         boolean guardNegate;
+        /** 原生内核句柄（懒创建；0 = 没建或不可用） */
+        long nativeHandle;
+        /** 指令流扫描结果：原生内核要预计算哪几个数组；含 fdlibm 指令则整段留 Java */
+        boolean scanned;
+        boolean usesAxis;
+        boolean usesTarget;
+        boolean usesRnd;
+        boolean nativeUnsafe;
     }
 
     private static final class Free
@@ -148,6 +156,12 @@ final class FastProgram
         double[] hv;
         /** 这段指令流可以走 4 粒通道执行器（不写云级变量、无 rand、无未知指令） */
         boolean lanes;
+        /** 原生内核句柄；0 = 这段走 Java（不可用 / 含 fdlibm 指令） */
+        long nativeHandle;
+        /** 原生内核要预计算的数组：长度 = 3n（axis）+ n（target）+ n（rnd） */
+        boolean usesAxis;
+        boolean usesTarget;
+        boolean usesRnd;
     }
 
     private static final Prepared[] NO_PREPARED = new Prepared[0];
@@ -947,7 +961,12 @@ final class FastProgram
             if (seg instanceof Loop)
             {
                 Prepared p = step.prepared[li++];
-                if (lanes && p.lanes)
+                if (p.nativeHandle != 0)
+                {
+                    // 原生内核：1 lane 标量实现，语义与 RegVm 逐条对齐
+                    randSeq = runNative(p, cloud, from, to, step.time, randSeq);
+                }
+                else if (lanes && p.lanes)
                 {
                     // 4 粒通道：同一指令流一次分派，4 条 lane 各执行一遍（逐位一致）
                     RegVm4.execute(p.code, p.pos, p.consts,
@@ -961,6 +980,168 @@ final class FastProgram
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------- 原生内核
+    //
+    // 只搬"逐粒子"的那一段：标量段、外提、自由变量搬运都还在 Java。
+    // 含 exp/pow/atan2 的程序整段留在 Java（这三条要 fdlibm，native 还没移植），
+    // 这样"能跑 native"和"结果逐位正确"是两个独立的事实，不会互相污染。
+
+    /** 原生内核真正跑过多少段（诊断/自检：区分"跑过且一致"和"根本没走原生"） */
+    private static final java.util.concurrent.atomic.AtomicLong NATIVE_STEPS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    static long nativeSteps()
+    {
+        return NATIVE_STEPS.get();
+    }
+
+    /** 预计算 axis/target/rnd 的线程内复用缓冲（每段一次，不分配） */
+    private static final ThreadLocal<double[]> SCRATCH_AXIS_X = ThreadLocal.withInitial(() -> new double[0]);
+    private static final ThreadLocal<double[]> SCRATCH_AXIS_Y = ThreadLocal.withInitial(() -> new double[0]);
+    private static final ThreadLocal<double[]> SCRATCH_AXIS_Z = ThreadLocal.withInitial(() -> new double[0]);
+    private static final ThreadLocal<double[]> SCRATCH_TARGET = ThreadLocal.withInitial(() -> new double[0]);
+    private static final ThreadLocal<double[]> SCRATCH_RND = ThreadLocal.withInitial(() -> new double[0]);
+
+    private static double[] scratch(ThreadLocal<double[]> tl, int need)
+    {
+        double[] a = tl.get();
+        if (a.length < need)
+        {
+            a = new double[need];
+            tl.set(a);
+        }
+        return a;
+    }
+
+    /** 扫描指令流：原生内核要不要预计算数组、有没有 fdlibm 指令 */
+    private static void scanNative(Loop L)
+    {
+        if (L.scanned)
+        {
+            return;
+        }
+        L.scanned = true;
+        int pc = 0;
+        final int n = L.code.length;
+        while (pc < n)
+        {
+            final int w = L.code[pc];
+            final int op = w >>> 24;
+            switch (op)
+            {
+                case RegVm.OP_LAXIS:
+                case RegVm.OP_LAXISX:
+                case RegVm.OP_LAXISY:
+                case RegVm.OP_LAXISZ:
+                    L.usesAxis = true;
+                    break;
+                case RegVm.OP_LTARGET:
+                    L.usesTarget = true;
+                    break;
+                case RegVm.OP_LR:
+                    L.usesRnd = true;
+                    break;
+                case RegVm.OP_EXP:
+                case RegVm.OP_POW:
+                case RegVm.OP_ATAN2:
+                    L.nativeUnsafe = true;
+                    break;
+                default:
+                    break;
+            }
+            pc += RegVm.length(op);
+        }
+    }
+
+    private static long nativeHandleFor(Loop L)
+    {
+        if (L.nativeUnsafe || !NativeVm.enabled())
+        {
+            return 0L;
+        }
+        long h = L.nativeHandle;
+        if (h == 0L)
+        {
+            h = NativeVm.create(L.code, L.consts);
+            L.nativeHandle = h;
+        }
+        return h;
+    }
+
+    /** 跑一段原生；返回本段结束时的 rand 序号 */
+    private static int runNative(Prepared p, SpellCloud cloud, int from, int to, double time, int randSeq)
+    {
+        final int n = to - from;
+        double[] axisX = null;
+        double[] axisY = null;
+        double[] axisZ = null;
+        double[] target = null;
+        double[] rnd = null;
+        if (p.usesAxis)
+        {
+            // SoA：向量内核要连续载入三个分量
+            axisX = scratch(SCRATCH_AXIS_X, n);
+            axisY = scratch(SCRATCH_AXIS_Y, n);
+            axisZ = scratch(SCRATCH_AXIS_Z, n);
+            double[] tmp = new double[3];
+            for (int k = 0; k < n; k++)
+            {
+                cloud.axisAt(from + k, time, tmp);
+                axisX[k] = tmp[0];
+                axisY[k] = tmp[1];
+                axisZ[k] = tmp[2];
+            }
+        }
+        if (p.usesTarget)
+        {
+            target = scratch(SCRATCH_TARGET, n);
+            for (int k = 0; k < n; k++)
+            {
+                target[k] = cloud.targetRadius(from + k, time);
+            }
+        }
+        if (p.usesRnd)
+        {
+            rnd = scratch(SCRATCH_RND, n);
+            for (int k = 0; k < n; k++)
+            {
+                rnd[k] = cloud.random01(from + k);
+            }
+        }
+        NATIVE_STEPS.incrementAndGet();
+        final int rc = NativeVm.run(p.nativeHandle, from, to,
+                cloud.rawX(), cloud.rawY(), cloud.rawZ(),
+                cloud.rawVx(), cloud.rawVy(), cloud.rawVz(),
+                cloud.rawEnergy(),
+                cloud.rawAnchorDx(), cloud.rawAnchorDy(), cloud.rawAnchorDz(),
+                axisX, axisY, axisZ, target, rnd,
+                cloud.originX, cloud.originY, cloud.originZ,
+                cloud.castSeed, cloud.ageSteps(), time, randSeq, p.fv, p.hv);
+        if (rc < 0)
+        {
+            throw nativeError(p, rc);
+        }
+        return rc;
+    }
+
+    /** 原生错误码 {@code -(ip*8+kind)} → 与 RegVm 同措辞的 ScriptException */
+    private static ScriptException nativeError(Prepared p, int rc)
+    {
+        final int code = -rc;
+        final int ip = code >>> 3;
+        final int kind = code & 7;
+        final String msg = switch (kind)
+        {
+            case 1 -> "除以零";
+            case 2 -> "取模的除数为零";
+            case 3 -> "tangent / radial 的第三个参数（轴向）不能是零向量";
+            case 4 -> "未知指令";
+            default -> "这条指令原生内核还不支持";
+        };
+        final int at = p.pos != null && ip >= 0 && ip < p.pos.length ? p.pos[ip] : 0;
+        return new ScriptException(msg, at >>> 12, at & 0xFFF);
     }
 
     /** 收尾：把写过的云级变量搬回 Env，再统一写回云上 */
@@ -1008,6 +1189,11 @@ final class FastProgram
         p.pos = L.pos;
         p.consts = L.consts;
         p.frameSize = L.frameSize;
+        scanNative(L);
+        p.nativeHandle = nativeHandleFor(L);
+        p.usesAxis = L.usesAxis;
+        p.usesTarget = L.usesTarget;
+        p.usesRnd = L.usesRnd;
 
         p.fv = new double[L.freeSlots];
         for (Free f : L.frees)

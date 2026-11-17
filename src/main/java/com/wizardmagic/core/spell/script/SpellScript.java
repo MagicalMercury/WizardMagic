@@ -766,4 +766,14 @@ public final class SpellScript
     {
         return RegVm4.executedCount();
     }
+
+    /**
+     * 诊断：原生内核真正跑过多少段（0 = 没加载、被关掉，或程序含 fdlibm 指令留在 Java）。
+     *
+     * <p>自检靠这个数区分"原生跑过且逐位一致"和"其实一直走的是 Java"。</p>
+     */
+    public static long nativeExecutions()
+    {
+        return FastProgram.nativeSteps();
+    }
 }

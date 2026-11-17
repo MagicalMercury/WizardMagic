@@ -1158,6 +1158,61 @@ public final class SpellCloud
         energy[i] = (float) value;
     }
 
+    // ------------------------------------------------------------ 原生内核（零拷贝）
+    //
+    // 原生内核直接读写这几条 SoA 数组的 [from, to) 区间。**不要换引用**，也不要缓存
+    // 到数组之外再改：它是一个内存里的布局，不是副本。
+
+    public double[] rawX()
+    {
+        return x;
+    }
+
+    public double[] rawY()
+    {
+        return y;
+    }
+
+    public double[] rawZ()
+    {
+        return z;
+    }
+
+    public double[] rawVx()
+    {
+        return vx;
+    }
+
+    public double[] rawVy()
+    {
+        return vy;
+    }
+
+    public double[] rawVz()
+    {
+        return vz;
+    }
+
+    public float[] rawEnergy()
+    {
+        return energy;
+    }
+
+    public double[] rawAnchorDx()
+    {
+        return anchorDX;
+    }
+
+    public double[] rawAnchorDy()
+    {
+        return anchorDY;
+    }
+
+    public double[] rawAnchorDz()
+    {
+        return anchorDZ;
+    }
+
     /** 形状锚点（世界坐标）：竖直回位弹簧的"家" */
     public double anchorX(int i)
     {
