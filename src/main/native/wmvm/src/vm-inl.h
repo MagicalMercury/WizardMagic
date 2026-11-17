@@ -18,6 +18,8 @@
 
 #include "jmath.h"
 #include "noise.h"
+#include "shapes.h"
+#include "sintable.h"
 
 namespace wmvm
 {
@@ -83,24 +85,8 @@ static constexpr int DST_SHIFT = 16;
 static constexpr int A_SHIFT = 8;
 static constexpr int FIELD = 0xFF;
 
-// ---------------------------------------------------------------- sin/cos 表
-/** 由 Java 侧灌进来的 65536 项 float 表（与 SpellMath 同一张） */
-extern const float* g_sin_table;
-extern int g_sin_count;
-
-static inline double table_sin(double radians)
-{
-    const float scaled = static_cast<float>(radians) * 10430.378f;
-    const int idx = jd2i(static_cast<double>(scaled)) & 65535;
-    return static_cast<double>(g_sin_table[idx]);
-}
-
-static inline double table_cos(double radians)
-{
-    const float scaled = static_cast<float>(radians) * 10430.378f + 16384.0f;
-    const int idx = jd2i(static_cast<double>(scaled)) & 65535;
-    return static_cast<double>(g_sin_table[idx]);
-}
+// ---------------------------------------------------------------- 形状采样
+// table_sin/table_cos 在 sintable.h；轴心与目标半径的采样在 shapes.h
 
 // ---------------------------------------------------------------- 程序
 struct Program
@@ -238,7 +224,6 @@ static inline int run_1lane(const Program& p, WmvmBatch& b, double* fv, const do
 
     for (int i = b.from; i < b.to; ++i)
     {
-        const int li = i - b.from;   // 预计算数组的下标
         int pc = 0;
 
         while (pc < n)
@@ -341,24 +326,40 @@ static inline int run_1lane(const Program& p, WmvmBatch& b, double* fv, const do
                     r[d] = b.pz[i] - b.origin_z;
                     break;
                 case OP_LAXIS:
-                    r[d] = b.axis_x[li];
-                    r[d + 1] = b.axis_y[li];
-                    r[d + 2] = b.axis_z[li];
+                {
+                    double ax[3];
+                    shape_axis(b, i, ax);
+                    r[d] = ax[0];
+                    r[d + 1] = ax[1];
+                    r[d + 2] = ax[2];
                     break;
+                }
                 case OP_LAXISX:
-                    r[d] = b.axis_x[li];
+                {
+                    double ax[3];
+                    shape_axis(b, i, ax);
+                    r[d] = ax[0];
                     break;
+                }
                 case OP_LAXISY:
-                    r[d] = b.axis_y[li];
+                {
+                    double ax[3];
+                    shape_axis(b, i, ax);
+                    r[d] = ax[1];
                     break;
+                }
                 case OP_LAXISZ:
-                    r[d] = b.axis_z[li];
+                {
+                    double ax[3];
+                    shape_axis(b, i, ax);
+                    r[d] = ax[2];
                     break;
+                }
                 case OP_LTARGET:
-                    r[d] = b.target[li];
+                    r[d] = shape_target(b, i);
                     break;
                 case OP_LR:
-                    r[d] = b.rnd[li];
+                    r[d] = shape_rnd(b, i);
                     break;
                 case OP_LAGE:
                     r[d] = time;

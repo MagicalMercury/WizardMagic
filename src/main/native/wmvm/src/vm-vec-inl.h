@@ -18,6 +18,8 @@
 
 #include "jmath.h"
 #include "noise.h"
+#include "shapes.h"
+#include "sintable.h"
 #include "wmvm.h"
 
 namespace wmvm_vec
@@ -83,8 +85,7 @@ int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* h
     // 逐组跑 [from, to)；尾部不足 L 的粒子交给标量内核（由调用方处理）
     for (int base = b.from; base + L <= b.to; base += L)
     {
-        // 粒子 SoA 数组是整条数组（绝对下标）；axis/target/rnd 是"本块"预算的（块内下标）
-        const int lbase = base - b.from;
+        // 粒子 SoA 数组是整条数组（绝对下标），形状采样也按绝对下标算
         uint32_t live = (1u << L) - 1u;
         for (int l = 0; l < L; ++l)
         {
@@ -243,24 +244,54 @@ int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* h
                     set(dst, Sub(LoadU(d, b.pz + base), Set(d, b.origin_z)));
                     break;
                 case ::wmvm::OP_LAXIS:
-                    set3(dst, LoadU(d, b.axis_x + lbase), LoadU(d, b.axis_y + lbase),
-                            LoadU(d, b.axis_z + lbase));
+                {
+                    double ax[MAXL], ay[MAXL], az[MAXL];
+                    for (int l = 0; l < L; ++l)
+                    {
+                        double v[3];
+                        ::wmvm::shape_axis(b, base + l, v);
+                        ax[l] = v[0];
+                        ay[l] = v[1];
+                        az[l] = v[2];
+                    }
+                    set3(dst, LoadU(d, ax), LoadU(d, ay), LoadU(d, az));
                     break;
+                }
                 case ::wmvm::OP_LAXISX:
-                    set(dst, LoadU(d, b.axis_x + lbase));
-                    break;
                 case ::wmvm::OP_LAXISY:
-                    set(dst, LoadU(d, b.axis_y + lbase));
-                    break;
                 case ::wmvm::OP_LAXISZ:
-                    set(dst, LoadU(d, b.axis_z + lbase));
+                {
+                    double av[MAXL];
+                    const int comp = op == ::wmvm::OP_LAXISX ? 0 : (op == ::wmvm::OP_LAXISY ? 1 : 2);
+                    for (int l = 0; l < L; ++l)
+                    {
+                        double v[3];
+                        ::wmvm::shape_axis(b, base + l, v);
+                        av[l] = v[comp];
+                    }
+                    set(dst, LoadU(d, av));
                     break;
+                }
                 case ::wmvm::OP_LTARGET:
-                    set(dst, LoadU(d, b.target + lbase));
+                {
+                    double tv[MAXL];
+                    for (int l = 0; l < L; ++l)
+                    {
+                        tv[l] = ::wmvm::shape_target(b, base + l);
+                    }
+                    set(dst, LoadU(d, tv));
                     break;
+                }
                 case ::wmvm::OP_LR:
-                    set(dst, LoadU(d, b.rnd + lbase));
+                {
+                    double tv[MAXL];
+                    for (int l = 0; l < L; ++l)
+                    {
+                        tv[l] = ::wmvm::shape_rnd(b, base + l);
+                    }
+                    set(dst, LoadU(d, tv));
                     break;
+                }
                 case ::wmvm::OP_LAGE:
                     set(dst, Set(d, time));
                     break;

@@ -47,6 +47,10 @@ public final class NativeVmParity
 
         // 真实内置法术：firestorm 的粒子循环 = 115 条指令，含 axis/targetR/noise/分支
         parity("firestorm", builtin("/data/wizardmagic/spells/firestorm.spell"), 11L, 30);
+        // 同一份 helix 脚本，但朝 +X 投出：tilted=true，轴心要过倾斜矩阵再平移
+        // （生产里实体/投射物把朝向传进来，这条路径不能只靠"竖直向上"的用例覆盖）
+        parity("firestorm 倾斜", builtin("/data/wizardmagic/spells/firestorm.spell"), 11L, 30,
+                new double[]{ 1.0, 0.0, 0.0 });
         parity("frost_nova", builtin("/data/wizardmagic/spells/frost_nova.spell"), 12L, 30);
         parity("flame_pillar", builtin("/data/wizardmagic/spells/flame_pillar.spell"), 13L, 30);
         parity("meteor", builtin("/data/wizardmagic/spells/meteor.spell"), 14L, 30);
@@ -86,6 +90,12 @@ public final class NativeVmParity
 
     private static void parity(String name, String source, long seed, int steps)
     {
+        parity(name, source, seed, steps, null);
+    }
+
+    /** @param face 云的朝向（null = 竖直向上，不倾斜） */
+    private static void parity(String name, String source, long seed, int steps, double[] face)
+    {
         if (source == null)
         {
             check("跳过（脚本不存在）：" + name, true);
@@ -99,13 +109,13 @@ public final class NativeVmParity
         NativeVm.setEnabled(false);
         try
         {
-            javaBits = after(script, seed, steps);
+            javaBits = after(script, seed, steps, face);
         }
         finally
         {
             NativeVm.setEnabled(true);
         }
-        nativeBits = after(script, seed, steps);
+        nativeBits = after(script, seed, steps, face);
 
         long used = SpellScript.nativeExecutions() - before;
         check(name + "：原生真的跑了（" + used + " 段）", used > 0);
@@ -116,9 +126,9 @@ public final class NativeVmParity
         }
     }
 
-    private static double[] after(SpellScript script, long seed, int steps)
+    private static double[] after(SpellScript script, long seed, int steps, double[] face)
     {
-        SpellCloud c = cloud(script, seed);
+        SpellCloud c = cloud(script, seed, face);
         for (int i = 0; i < steps; i++)
         {
             c.step();
@@ -199,13 +209,18 @@ public final class NativeVmParity
                 + body.replace("\n", "\n    ") + "\n  }\n}\n";
     }
 
-    private static SpellCloud cloud(SpellScript script, long seed)
+    private static SpellCloud cloud(SpellScript script, long seed, double[] face)
     {
         CastResult r = script.cast(ZERO, seed);
         EmitSpec e = r.emits().get(0);
-        SpellCloud c = new SpellCloud(1, seed, e.elementId(), e.count(), e.x(), e.y(), e.z(),
-                e.lifeSec(), e.shapeId(), e.params(), script, r.vars());
-        return c;
+        if (face == null)
+        {
+            return new SpellCloud(1, seed, e.elementId(), e.count(), e.x(), e.y(), e.z(),
+                    e.lifeSec(), e.shapeId(), e.params(), script, r.vars());
+        }
+        return new SpellCloud(1, seed, e.elementId(), e.count(), e.x(), e.y(), e.z(),
+                e.lifeSec(), e.shapeId(), e.params(), script, r.vars(),
+                face[0], face[1], face[2]);
     }
 
     private static String builtin(String resource)

@@ -134,8 +134,10 @@ Java_com_wizardmagic_core_spell_script_NativeVm_nativeRun(JNIEnv* env, jclass, j
         jdoubleArray jvx, jdoubleArray jvy, jdoubleArray jvz,
         jfloatArray jenergy,
         jdoubleArray jadx, jdoubleArray jady, jdoubleArray jadz,
-        jdoubleArray jaxisX, jdoubleArray jaxisY, jdoubleArray jaxisZ,
-        jdoubleArray jtarget, jdoubleArray jrnd,
+        jint shapeKind, jint shapeCount, jdoubleArray jshapePrep,
+        jdouble sRadius, jdouble sLength, jdouble sHeight, jdouble sTurns,
+        jdouble sFrequency, jdouble sPulse, jdouble sWave, jdouble sSpeed,
+        jint tilted, jdoubleArray jtilt,
         jdouble ox, jdouble oy, jdouble oz,
         jlong seed, jint ageStep, jdouble time, jint randSeq,
         jdoubleArray jfv, jdoubleArray jhv)
@@ -156,6 +158,18 @@ Java_com_wizardmagic_core_spell_script_NativeVm_nativeRun(JNIEnv* env, jclass, j
     b.age_step = static_cast<int>(ageStep);
     b.time = time;
     b.rand_seq = static_cast<int>(randSeq);
+
+    b.shape_kind = static_cast<int>(shapeKind);
+    b.shape_count = static_cast<int>(shapeCount);
+    b.shape_radius = sRadius;
+    b.shape_length = sLength;
+    b.shape_height = sHeight;
+    b.shape_turns = sTurns;
+    b.shape_frequency = sFrequency;
+    b.shape_radius_pulse = sPulse;
+    b.shape_radius_wave = sWave;
+    b.shape_radius_speed = sSpeed;
+    b.tilted = static_cast<int>(tilted);
 
     // 逐个钉住；数组传 null 表示这个量这一段用不到
     struct Arr
@@ -186,11 +200,22 @@ Java_com_wizardmagic_core_spell_script_NativeVm_nativeRun(JNIEnv* env, jclass, j
     b.anchor_dx = static_cast<const double*>(pin(jadx));
     b.anchor_dy = static_cast<const double*>(pin(jady));
     b.anchor_dz = static_cast<const double*>(pin(jadz));
-    b.axis_x = static_cast<const double*>(pin(jaxisX));
-    b.axis_y = static_cast<const double*>(pin(jaxisY));
-    b.axis_z = static_cast<const double*>(pin(jaxisZ));
-    b.target = static_cast<const double*>(pin(jtarget));
-    b.rnd = static_cast<const double*>(pin(jrnd));
+    b.shape_prep = static_cast<const double*>(pin(jshapePrep));
+    if (b.tilted != 0)
+    {
+        auto* m = static_cast<const double*>(pin(jtilt));
+        if (m != nullptr)
+        {
+            for (int i = 0; i < 9; ++i)
+            {
+                b.tilt[i] = m[i];
+            }
+        }
+        else
+        {
+            b.tilted = 0;
+        }
+    }
     auto* fv = static_cast<double*>(pin(jfv));
     auto* hv = static_cast<const double*>(pin(jhv));
 

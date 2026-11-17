@@ -1266,6 +1266,42 @@ public final class SpellCloud
         return SpellRandom.unit(castSeed, i, 91);
     }
 
+    // ------------------------------------------------- 原生内核的形状打包
+    // 原生侧自己算轴心 / 目标半径 / 每粒随机数（见 native/wmvm/src/shapes.h），
+    // 所以只需要把"每朵云不变"的几样东西传过去；每步不再预计算五组数组。
+
+    /** 2 / 粒的形状静态系数（helix 的 pow 缓存），构造时算好，只读 */
+    public double[] nativeShapePrep()
+    {
+        return shapePrep;
+    }
+
+    /** 形状种类，与 {@code wmvm.h} 的 {@code shape_kind} 对齐：1 = helix */
+    public int nativeShapeKind()
+    {
+        return "helix".equals(shape.id()) ? 1 : 0;
+    }
+
+    /** 是否带倾斜矩阵（不倾斜时原生侧跳过矩阵乘） */
+    public boolean nativeTilted()
+    {
+        return tilted;
+    }
+
+    /** 行优先 m00..m22，写进调用方给的 9 个槽位 */
+    public void nativeTilt(double[] out)
+    {
+        out[0] = m00;
+        out[1] = m01;
+        out[2] = m02;
+        out[3] = m10;
+        out[4] = m11;
+        out[5] = m12;
+        out[6] = m20;
+        out[7] = m21;
+        out[8] = m22;
+    }
+
     // ---------------------------------------------------------------- 哈希
 
     /**

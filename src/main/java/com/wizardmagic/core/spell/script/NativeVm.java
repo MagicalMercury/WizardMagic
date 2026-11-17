@@ -159,15 +159,20 @@ public final class NativeVm
             double[] vx, double[] vy, double[] vz,
             float[] energy,
             double[] anchorDx, double[] anchorDy, double[] anchorDz,
-            double[] axisX, double[] axisY, double[] axisZ,
-            double[] target, double[] rnd,
+            int shapeKind, int shapeCount, double[] shapePrep,
+            double sRadius, double sLength, double sHeight, double sTurns,
+            double sFrequency, double sPulse, double sWave, double sSpeed,
+            int tilted, double[] tilt,
             double originX, double originY, double originZ,
             long seed, int ageStep, double time, int randSeq,
             double[] fv, double[] hv)
     {
         return nativeRun(handle, from, to,
                 px, py, pz, vx, vy, vz, energy,
-                anchorDx, anchorDy, anchorDz, axisX, axisY, axisZ, target, rnd,
+                anchorDx, anchorDy, anchorDz,
+                shapeKind, shapeCount, shapePrep,
+                sRadius, sLength, sHeight, sTurns, sFrequency, sPulse, sWave, sSpeed,
+                tilted, tilt,
                 originX, originY, originZ, seed, ageStep, time, randSeq, fv, hv);
     }
 
@@ -232,8 +237,10 @@ public final class NativeVm
             double[] vx, double[] vy, double[] vz,
             float[] energy,
             double[] anchorDx, double[] anchorDy, double[] anchorDz,
-            double[] axisX, double[] axisY, double[] axisZ,
-            double[] target, double[] rnd,
+            int shapeKind, int shapeCount, double[] shapePrep,
+            double sRadius, double sLength, double sHeight, double sTurns,
+            double sFrequency, double sPulse, double sWave, double sSpeed,
+            int tilted, double[] tilt,
             double originX, double originY, double originZ,
             long seed, int ageStep, double time, int randSeq,
             double[] fv, double[] hv);

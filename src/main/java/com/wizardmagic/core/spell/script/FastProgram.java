@@ -1,5 +1,6 @@
 package com.wizardmagic.core.spell.script;
 
+import com.wizardmagic.api.spell.ShapeParams;
 import com.wizardmagic.core.spell.SpellCloud;
 import com.wizardmagic.core.spell.SpellConstants;
 import com.wizardmagic.core.spell.SpellElements;
@@ -98,11 +99,8 @@ final class FastProgram
         boolean guardNegate;
         /** 原生内核句柄（懒创建；0 = 没建或不可用） */
         long nativeHandle;
-        /** 指令流扫描结果：原生内核要预计算哪几个数组；含 fdlibm 指令则整段留 Java */
+        /** 指令流扫描结果：含 fdlibm 指令则整段留 Java */
         boolean scanned;
-        boolean usesAxis;
-        boolean usesTarget;
-        boolean usesRnd;
         boolean nativeUnsafe;
     }
 
@@ -158,10 +156,6 @@ final class FastProgram
         boolean lanes;
         /** 原生内核句柄；0 = 这段走 Java（不可用 / 含 fdlibm 指令） */
         long nativeHandle;
-        /** 原生内核要预计算的数组：长度 = 3n（axis）+ n（target）+ n（rnd） */
-        boolean usesAxis;
-        boolean usesTarget;
-        boolean usesRnd;
     }
 
     private static final Prepared[] NO_PREPARED = new Prepared[0];
@@ -997,25 +991,20 @@ final class FastProgram
         return NATIVE_STEPS.get();
     }
 
-    /** 预计算 axis/target/rnd 的线程内复用缓冲（每段一次，不分配） */
-    private static final ThreadLocal<double[]> SCRATCH_AXIS_X = ThreadLocal.withInitial(() -> new double[0]);
-    private static final ThreadLocal<double[]> SCRATCH_AXIS_Y = ThreadLocal.withInitial(() -> new double[0]);
-    private static final ThreadLocal<double[]> SCRATCH_AXIS_Z = ThreadLocal.withInitial(() -> new double[0]);
-    private static final ThreadLocal<double[]> SCRATCH_TARGET = ThreadLocal.withInitial(() -> new double[0]);
-    private static final ThreadLocal<double[]> SCRATCH_RND = ThreadLocal.withInitial(() -> new double[0]);
+    /**
+     * 形状倾斜矩阵的复用缓冲（每段一次，不分配；不倾斜时整段不用）。
+     *
+     * <p>axis / target / rnd 原先也在这里预算成五组数组再交给原生，现在原生自己按
+     * {@code (i, time)} 算（见 {@code native/wmvm/src/shapes.h}），这几块缓冲随之删掉。</p>
+     */
+    private static final ThreadLocal<double[]> SCRATCH_TILT = ThreadLocal.withInitial(() -> new double[9]);
 
-    private static double[] scratch(ThreadLocal<double[]> tl, int need)
+    private static double[] tiltScratch()
     {
-        double[] a = tl.get();
-        if (a.length < need)
-        {
-            a = new double[need];
-            tl.set(a);
-        }
-        return a;
+        return SCRATCH_TILT.get();
     }
 
-    /** 扫描指令流：原生内核要不要预计算数组、有没有 fdlibm 指令 */
+    /** 扫描指令流：有没有原生内核这一版还实现不了的 fdlibm 指令 */
     private static void scanNative(Loop L)
     {
         if (L.scanned)
@@ -1029,27 +1018,9 @@ final class FastProgram
         {
             final int w = L.code[pc];
             final int op = w >>> 24;
-            switch (op)
+            if (op == RegVm.OP_EXP || op == RegVm.OP_POW || op == RegVm.OP_ATAN2)
             {
-                case RegVm.OP_LAXIS:
-                case RegVm.OP_LAXISX:
-                case RegVm.OP_LAXISY:
-                case RegVm.OP_LAXISZ:
-                    L.usesAxis = true;
-                    break;
-                case RegVm.OP_LTARGET:
-                    L.usesTarget = true;
-                    break;
-                case RegVm.OP_LR:
-                    L.usesRnd = true;
-                    break;
-                case RegVm.OP_EXP:
-                case RegVm.OP_POW:
-                case RegVm.OP_ATAN2:
-                    L.nativeUnsafe = true;
-                    break;
-                default:
-                    break;
+                L.nativeUnsafe = true;
             }
             pc += RegVm.length(op);
         }
@@ -1073,42 +1044,15 @@ final class FastProgram
     /** 跑一段原生；返回本段结束时的 rand 序号 */
     private static int runNative(Prepared p, SpellCloud cloud, int from, int to, double time, int randSeq)
     {
-        final int n = to - from;
-        double[] axisX = null;
-        double[] axisY = null;
-        double[] axisZ = null;
-        double[] target = null;
-        double[] rnd = null;
-        if (p.usesAxis)
+        // 轴心 / 目标半径 / 每粒随机数都由原生按 (i, time) 自己算：每步少一遍全量预算与
+        // 五组数组的写 + 读（形状参数与 pow 缓存都是每朵云不变的，只传指针/标量）。
+        final ShapeParams sp = cloud.shapeParams;
+        final boolean tilted = cloud.nativeTilted();
+        double[] tilt = null;
+        if (tilted)
         {
-            // SoA：向量内核要连续载入三个分量
-            axisX = scratch(SCRATCH_AXIS_X, n);
-            axisY = scratch(SCRATCH_AXIS_Y, n);
-            axisZ = scratch(SCRATCH_AXIS_Z, n);
-            double[] tmp = new double[3];
-            for (int k = 0; k < n; k++)
-            {
-                cloud.axisAt(from + k, time, tmp);
-                axisX[k] = tmp[0];
-                axisY[k] = tmp[1];
-                axisZ[k] = tmp[2];
-            }
-        }
-        if (p.usesTarget)
-        {
-            target = scratch(SCRATCH_TARGET, n);
-            for (int k = 0; k < n; k++)
-            {
-                target[k] = cloud.targetRadius(from + k, time);
-            }
-        }
-        if (p.usesRnd)
-        {
-            rnd = scratch(SCRATCH_RND, n);
-            for (int k = 0; k < n; k++)
-            {
-                rnd[k] = cloud.random01(from + k);
-            }
+            tilt = tiltScratch();
+            cloud.nativeTilt(tilt);
         }
         NATIVE_STEPS.incrementAndGet();
         final int rc = NativeVm.run(p.nativeHandle, from, to,
@@ -1116,7 +1060,10 @@ final class FastProgram
                 cloud.rawVx(), cloud.rawVy(), cloud.rawVz(),
                 cloud.rawEnergy(),
                 cloud.rawAnchorDx(), cloud.rawAnchorDy(), cloud.rawAnchorDz(),
-                axisX, axisY, axisZ, target, rnd,
+                cloud.nativeShapeKind(), cloud.count, cloud.nativeShapePrep(),
+                sp.radius(), sp.length(), sp.height(), sp.turns(),
+                sp.frequency(), sp.radiusPulse(), sp.radiusWave(), sp.radiusSpeed(),
+                tilted ? 1 : 0, tilt,
                 cloud.originX, cloud.originY, cloud.originZ,
                 cloud.castSeed, cloud.ageSteps(), time, randSeq, p.fv, p.hv);
         if (rc < 0)
@@ -1191,9 +1138,6 @@ final class FastProgram
         p.frameSize = L.frameSize;
         scanNative(L);
         p.nativeHandle = nativeHandleFor(L);
-        p.usesAxis = L.usesAxis;
-        p.usesTarget = L.usesTarget;
-        p.usesRnd = L.usesRnd;
 
         p.fv = new double[L.freeSlots];
         for (Free f : L.frees)

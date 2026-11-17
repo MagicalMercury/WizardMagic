@@ -48,13 +48,21 @@ typedef struct WmvmBatch
     const double* anchor_dy;
     const double* anchor_dz;
 
-    /* 下面几个是 `(i, time)` 的纯函数，Java 侧按块预先算好；不用就传 NULL。
-     * axis 拆成三组 SoA（不是 3/粒 交错）：向量内核要连续载入。 */
-    const double* axis_x;
-    const double* axis_y;
-    const double* axis_z;
-    const double* target;    /* 1 / 粒 */
-    const double* rnd;       /* 1 / 粒 */
+    /* 形状：轴心 / 目标半径 / 每粒随机数都在 native 里算（原来由 Java 按块预算成
+     * axis_x/axis_y/axis_z/target/rnd 五组数组再传进来，多一遍全量写读）。 */
+    int shape_kind;            /* 0 = 无（轴心 = origin，目标半径 = -1）；1 = helix */
+    int shape_count;           /* 云的粒子总数（不是段长：t = (i+0.5)/count 用绝对下标） */
+    const double* shape_prep;  /* 2 / 粒，helix 构造时算好的 pow(t, ·) 缓存 */
+    double shape_radius;       /* R_t */
+    double shape_length;       /* A_t（顶部轴半径） */
+    double shape_height;       /* H */
+    double shape_turns;        /* ω（轴角速度） */
+    double shape_frequency;    /* k_y（全高波数） */
+    double shape_radius_pulse; /* ε_r */
+    double shape_radius_wave;  /* k_r */
+    double shape_radius_speed; /* ω_r */
+    int tilted;                /* 0 = 不旋转 */
+    double tilt[9];            /* 行优先 m00..m22：局部 → 世界方向 */
 
     double origin_x, origin_y, origin_z;
 

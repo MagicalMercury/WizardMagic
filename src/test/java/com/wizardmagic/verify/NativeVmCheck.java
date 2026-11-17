@@ -124,8 +124,8 @@ public final class NativeVmCheck
         double[] fv = new double[8];
         double[] hv = new double[8];
 
-        int rc = NativeVm.run(h, 0, 3, px, py, pz, vx, vy, vz, en,
-                zero, zero, zero, null, null, null, null, null, 0.0, 0.0, 0.0, 7L, 0, 0.0, 0, fv, hv);
+        int rc = run(h, 0, 3, px, py, pz, vx, vy, vz, en,
+                zero, zero, zero, 0.0, 0.0, 0.0, 7L, 0, 0.0, 0, fv, hv);
         check("run 返回 0", rc == 0);
         checkBits("pos[0] += vx", px[0], 1.5);
         checkBits("pos[1] += vx", px[1], 1.75);
@@ -149,8 +149,8 @@ public final class NativeVmCheck
         float[] en = { 0.0F };
         double[] fv = new double[8];
         double[] hv = new double[8];
-        int rc = NativeVm.run(h, 0, 1, one, one, one, one, one, one, en,
-                zero, zero, zero, null, null, null, null, null, 0.0, 0.0, 0.0, 1L, 0, 0.0, 0, fv, hv);
+        int rc = run(h, 0, 1, one, one, one, one, one, one, en,
+                zero, zero, zero, 0.0, 0.0, 0.0, 1L, 0, 0.0, 0, fv, hv);
         // ip = 4（第 3 条指令的字下标），kind = 1（除零）
         check("除零返回错误码 -(4*8+1)", rc == -(4 * 8 + 1));
         check("错误说明非空", !NativeVm.lastError().isEmpty());
@@ -167,10 +167,25 @@ public final class NativeVmCheck
         double[] zero = { 0.0 };
         double[] fv = new double[8];
         double[] hv = new double[8];
-        int rc = NativeVm.run(h, 0, 1, one, one, one, one, one, one, en,
-                zero, zero, zero, null, null, null, null, null, 0.0, 0.0, 0.0, 1L, 0, 0.0, 0, fv, hv);
+        int rc = run(h, 0, 1, one, one, one, one, one, one, en,
+                zero, zero, zero, 0.0, 0.0, 0.0, 1L, 0, 0.0, 0, fv, hv);
         check("exp 返回 UNSUPPORTED", rc == -(0 * 8 + 5));
         NativeVm.destroy(h);
+    }
+
+    /** 形状参数全缺省（非 helix、不倾斜）的 wmvm_run 包装 */
+    private static int run(long h, int from, int to,
+            double[] px, double[] py, double[] pz,
+            double[] vx, double[] vy, double[] vz, float[] en,
+            double[] anchorDx, double[] anchorDy, double[] anchorDz,
+            double ox, double oy, double oz, long seed, int ageStep, double time, int randSeq,
+            double[] fv, double[] hv)
+    {
+        return NativeVm.run(h, from, to, px, py, pz, vx, vy, vz, en,
+                anchorDx, anchorDy, anchorDz,
+                0, 1, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0, null,
+                ox, oy, oz, seed, ageStep, time, randSeq, fv, hv);
     }
 
     private static int w(int op, int d, int a, int b)
