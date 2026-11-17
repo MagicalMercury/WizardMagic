@@ -69,6 +69,8 @@ thread_local char g_error[256] = {0};
 
 /** 0 = 自动（按 CPU 选 4/8）；1 = 强制标量 */
 int g_forced_lanes = 0;
+/** 自检专用：忽略 vec_ok 判据（见 wmvm_force_vec） */
+bool g_force_vec = false;
 }  // namespace wmvm
 
 struct WmvmProgram
@@ -111,6 +113,12 @@ int wmvm_force_lanes(int lanes)
         return lanes;
     }
     return 0;   // 这个目标没有这么多 lane
+}
+
+int wmvm_force_vec(int on)
+{
+    wmvm::g_force_vec = on != 0;
+    return wmvm::g_force_vec ? 1 : 0;
 }
 
 int wmvm_set_sin_table(const float* table, int count)
@@ -193,7 +201,8 @@ int wmvm_run(const WmvmProgram* p, WmvmBatch* b, double* fv, const double* hv)
     {
         lanes = HWY_DYNAMIC_DISPATCH(VecLanes)();
     }
-    if (p->prog.lane1_only || !p->prog.vec_ok || lanes <= 1 || total < lanes)
+    if (p->prog.lane1_only || (!p->prog.vec_ok && !wmvm::g_force_vec) || lanes <= 1
+            || total < lanes)
     {
         return wmvm::run_1lane(p->prog, *b, fv, hv);
     }

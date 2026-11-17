@@ -434,7 +434,7 @@ int main()
         const auto t2 = std::chrono::steady_clock::now();
         const double ns1 = std::chrono::duration<double, std::nano>(t1 - t0).count() / (iters * (double) n);
         const double nsN = std::chrono::duration<double, std::nano>(t2 - t1).count() / (iters * (double) n);
-        std::printf("[bench] 3x NOISE   1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (cache hits=%ld misses=%ld)\n",
+        std::printf("[bench] 3x NOISE   1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (vec_ok=false：两侧都是标量)  (cache hits=%ld misses=%ld)\n",
                 ns1, wmvm_lanes(), nsN, ns1 / nsN, wmvm::g_noise_cache.hits, wmvm::g_noise_cache.misses);
         wmvm_force_lanes(0);
         wmvm_program_destroy(prog);
@@ -476,11 +476,137 @@ int main()
         const auto t2 = std::chrono::steady_clock::now();
         const double ns1 = std::chrono::duration<double, std::nano>(t1 - t0).count() / (iters * (double) n);
         const double nsN = std::chrono::duration<double, std::nano>(t2 - t1).count() / (iters * (double) n);
-        std::printf("[bench] 1x if + 20x SCALE  1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx\n",
+        std::printf("[bench] 1x if + 20x SCALE  1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (vec_ok=false：两侧都是标量)\n",
                 ns1, wmvm_lanes(), nsN, ns1 / nsN);
         wmvm_force_lanes(0);
         wmvm_program_destroy(prog);
     }
+    // ---------------- 9/10/11) firestorm 混合：3x NOISE + 20x SCALE
+    //
+    // 之前的 "3x NOISE" 与 "1x if + 20x SCALE" 两条基准其实是**标量比标量**：
+    // 含 NOISE / JZ 的程序会被 vec_ok 判据留在标量内核，wmvm_force_lanes 也救不回来。
+    // 想量"向量内核跑 firestorm 会怎样"，必须先 wmvm_force_vec(1)。
+    {
+        struct Variant
+        {
+            const char* name;
+            bool divergent;
+            bool useSelect;
+        };
+        const Variant variants[] = {
+            { "混合 3x NOISE + 20x SCALE，条件全真（无分歧）", false, false },
+            { "混合 …，条件真假交替（真分歧）", true, false },
+            { "混合 …，条件真假交替 + SELECT（if-converted）", true, true },
+        };
+
+        const int n = 4096;
+        std::vector<double> px(n), py(n), pz(n), vx(n, 0.0), vy(n, 0.0), vz(n, 0.0);
+        std::vector<float> en(n, 1.0f);
+        double fv[8] = {0}, hv[8] = {0};
+
+        for (const Variant& v : variants)
+        {
+            Asm s;
+            s.op(LPOS, 0, 0, 0);
+            if (v.useSelect)
+            {
+                s.op(MOV3, 9, 0, 0);          // 保存旧 pos（假分支的值）
+            }
+            s.op(LDK, 3, 0, 0);
+            s.code.push_back(s.k(0.0));
+            s.op(GT, 4, 0, 3);                // r4 = (px > 0)
+            int jzSite = -1;
+            if (!v.useSelect)
+            {
+                s.op(JZ, 4, 0, 0);
+                jzSite = static_cast<int>(s.code.size());
+                s.code.push_back(-1);
+            }
+            s.op(LDK, 5, 0, 0);
+            s.code.push_back(s.k(0.999));
+            for (int i = 0; i < 20; ++i)
+            {
+                s.op(SCALE, 0, 0, 5);
+            }
+            s.op2(NOISE, 6, 0, 1, 2, 3);
+            s.op2(NOISE, 7, 0, 1, 2, 3);
+            s.op2(NOISE, 8, 0, 1, 2, 3);
+            s.op(ADD_N, 6, 6, 7);
+            s.op(ADD_N, 8, 8, 6);
+            s.op(ADD_N, 0, 0, 8);
+            if (v.useSelect)
+            {
+                for (int c = 0; c < 3; ++c)
+                {
+                    s.op(SELECT, c, 4, c);
+                    s.code.push_back(9 + c);
+                }
+            }
+            if (jzSite >= 0)
+            {
+                s.code[jzSite] = static_cast<int>(s.code.size());
+            }
+            s.op(SPOS, 0, 0, 0);
+
+            WmvmProgram* prog = wmvm_program_create(s.code.data(), static_cast<int>(s.code.size()),
+                    s.consts.data(), static_cast<int>(s.consts.size()));
+            auto runOnce = [&](int lanes, int forceVec) {
+                wmvm_force_lanes(lanes);
+                wmvm_force_vec(forceVec);
+                for (int i = 0; i < n; ++i)
+                {
+                    px[i] = v.divergent ? ((i & 1) != 0 ? 1.0 : -1.0) : 1.0;
+                    py[i] = 1.0;
+                    pz[i] = 2.0;
+                }
+                WmvmBatch bb = make_batch(n, px, py, pz, vx, vy, vz, en);
+                return wmvm_run(prog, &bb, fv, hv);
+            };
+            for (int w = 0; w < 3; ++w)
+            {
+                runOnce(1, 0);
+                runOnce(0, 1);
+            }
+            const int iters = 100;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < iters; ++i)
+            {
+                runOnce(1, 0);
+            }
+            const auto t1 = std::chrono::steady_clock::now();
+            for (int i = 0; i < iters; ++i)
+            {
+                runOnce(0, 1);
+            }
+            const auto t2 = std::chrono::steady_clock::now();
+            const double ns1 = std::chrono::duration<double, std::nano>(t1 - t0).count() / (iters * (double) n);
+            const double nsN = std::chrono::duration<double, std::nano>(t2 - t1).count() / (iters * (double) n);
+            std::printf("[bench] %-46s 1 lane = %.1f  %d lane = %.1f  倍率 = %.2fx\n",
+                    v.name, ns1, wmvm_lanes(), nsN, ns1 / nsN);
+
+            // 顺带验一致性：同一段程序标量 vs 向量必须逐位相同。
+            // （向量内核的 NOISE 路径在生产里被 vec_ok 挡着，从来没被验证过）
+            runOnce(1, 0);
+            std::vector<double> refX = px;
+            std::vector<double> refY = py;
+            std::vector<double> refZ = pz;
+            runOnce(0, 1);
+            bool same = true;
+            for (int i = 0; i < n && same; ++i)
+            {
+                same = bits(px[i]) == bits(refX[i]) && bits(py[i]) == bits(refY[i])
+                        && bits(pz[i]) == bits(refZ[i]);
+            }
+            char label[256];
+            std::snprintf(label, sizeof(label), "逐位一致（标量 vs 向量）：%s", v.name);
+            expect_true(label, same);
+
+            wmvm_force_vec(0);
+            wmvm_force_lanes(0);
+            wmvm_program_destroy(prog);
+        }
+    }
+
     std::printf("\nchecks=%d failures=%d\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

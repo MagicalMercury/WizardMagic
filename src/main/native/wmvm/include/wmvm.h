@@ -84,6 +84,14 @@ int wmvm_lanes(void);
 /** 强制 lane 数（1/4/8，0 = 自动）。当前目标不支持时返回 0，否则返回实际值 */
 int wmvm_force_lanes(int lanes);
 
+/**
+ * 自检/基准专用：忽略"含 noise 或分支就留在标量"的判据，强行让向量内核跑。
+ *
+ * <p>生产路径永远不调它（Java 侧没有绑定）。存在的理由是<b>测量</b>：判据一旦关掉，
+ * 就永远测不到"向量内核跑 firestorm 会怎样"，只能靠猜。</p>
+ */
+int wmvm_force_vec(int on);
+
 /** sin 查表数据（65536 项 float，与 Java SpellMath 同一张表）。不设置就不能用 sin/cos。 */
 int wmvm_set_sin_table(const float* table, int count);
 
