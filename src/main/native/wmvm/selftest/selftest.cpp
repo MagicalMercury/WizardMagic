@@ -490,13 +490,20 @@ int main()
         struct Variant
         {
             const char* name;
-            bool divergent;
-            bool useSelect;
+            int scale;      /* 20x SCALE 的条数 */
+            int noise;      /* NOISE 的条数 */
+            bool branch;    /* 是否用 JZ 包住主体 */
+            bool divergent; /* 相邻粒子条件相反（逼出分歧） */
+            bool useSelect; /* 用 MOV3+SELECT 代替分支（if-conversion 的产物） */
         };
         const Variant variants[] = {
-            { "混合 3x NOISE + 20x SCALE，条件全真（无分歧）", false, false },
-            { "混合 …，条件真假交替（真分歧）", true, false },
-            { "混合 …，条件真假交替 + SELECT（if-converted）", true, true },
+            { "20x SCALE + JZ（无 noise，真分歧）", 20, 0, true, true, false },
+            { "3x NOISE（无分支、无 SCALE）", 0, 3, false, false, false },
+            { "3x NOISE + JZ（无 SCALE，真分歧）", 0, 3, true, true, false },
+            { "20 SCALE + 3 NOISE（无分支：frost_nova 的形状）", 20, 3, false, false, false },
+            { "全混 20 SCALE + 3 NOISE + JZ（条件全真：firestorm 常态）", 20, 3, true, false, false },
+            { "全混 20 SCALE + 3 NOISE + JZ（真分歧）", 20, 3, true, true, false },
+            { "全混 … + SELECT（if-converted，真分歧）", 20, 3, false, true, true },
         };
 
         const int n = 4096;
@@ -512,11 +519,14 @@ int main()
             {
                 s.op(MOV3, 9, 0, 0);          // 保存旧 pos（假分支的值）
             }
-            s.op(LDK, 3, 0, 0);
-            s.code.push_back(s.k(0.0));
-            s.op(GT, 4, 0, 3);                // r4 = (px > 0)
             int jzSite = -1;
-            if (!v.useSelect)
+            if (v.branch || v.useSelect)
+            {
+                s.op(LDK, 3, 0, 0);
+                s.code.push_back(s.k(0.0));
+                s.op(GT, 4, 0, 3);            // r4 = (px > 0)
+            }
+            if (v.branch)
             {
                 s.op(JZ, 4, 0, 0);
                 jzSite = static_cast<int>(s.code.size());
@@ -524,16 +534,18 @@ int main()
             }
             s.op(LDK, 5, 0, 0);
             s.code.push_back(s.k(0.999));
-            for (int i = 0; i < 20; ++i)
+            for (int i = 0; i < v.scale; ++i)
             {
                 s.op(SCALE, 0, 0, 5);
             }
-            s.op2(NOISE, 6, 0, 1, 2, 3);
-            s.op2(NOISE, 7, 0, 1, 2, 3);
-            s.op2(NOISE, 8, 0, 1, 2, 3);
-            s.op(ADD_N, 6, 6, 7);
-            s.op(ADD_N, 8, 8, 6);
-            s.op(ADD_N, 0, 0, 8);
+            for (int k = 0; k < v.noise; ++k)
+            {
+                s.op2(NOISE, 6 + k, 0, 1, 2, 3 + k);
+            }
+            for (int k = 0; k < v.noise; ++k)
+            {
+                s.op(ADD_N, 0, 0, 6 + k);     // 让 noise 结果必须被算出来
+            }
             if (v.useSelect)
             {
                 for (int c = 0; c < 3; ++c)
@@ -586,11 +598,18 @@ int main()
 
             // 顺带验一致性：同一段程序标量 vs 向量必须逐位相同。
             // （向量内核的 NOISE 路径在生产里被 vec_ok 挡着，从来没被验证过）
+            const long h0 = wmvm::g_noise_cache.hits;
+            const long m0 = wmvm::g_noise_cache.misses;
             runOnce(1, 0);
+            const long h1 = wmvm::g_noise_cache.hits;
+            const long m1 = wmvm::g_noise_cache.misses;
             std::vector<double> refX = px;
             std::vector<double> refY = py;
             std::vector<double> refZ = pz;
             runOnce(0, 1);
+            std::printf("       noise cache：标量 hits=%ld misses=%ld ｜ 向量 hits=%ld misses=%ld\n",
+                    h1 - h0, m1 - m0, wmvm::g_noise_cache.hits - h1,
+                    wmvm::g_noise_cache.misses - m1);
             bool same = true;
             for (int i = 0; i < n && same; ++i)
             {

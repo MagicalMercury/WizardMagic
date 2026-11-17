@@ -13,6 +13,15 @@
 
 #include "jmath.h"
 
+/** 强制内联（GCC/Clang 用 attribute，MSVC 用 __forceinline） */
+#if defined(_MSC_VER)
+#define WMVM_ALWAYS_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define WMVM_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#define WMVM_ALWAYS_INLINE inline
+#endif
+
 namespace wmvm
 {
 
@@ -97,10 +106,18 @@ static inline double corner(int64_t seed, int x, int y, int z, int step)
     return static_cast<double>(mix64(h) >> 11) * 0x1.0p-53 * 2.0 - 1.0;
 }
 
-/** 三维 value noise，返回 [-1, 1]（与 SpellNoise.value3 逐位一致） */
-static inline double value3(int64_t seed, double x, double y, double z, int step)
+/**
+ * 三维 value noise，返回 [-1, 1]（与 SpellNoise.value3 逐位一致）。
+ *
+ * <p><b>缓存为什么要显式传进来</b>：原来这里直接抓 {@code g_noise_cache}（thread_local）。
+ * 标量内核里它被内联掉了，没事；但向量内核的 switch 太大、这个函数没被内联，
+ * 于是每次调用都要为 <b>每一次</b> {@code g_noise_cache} 访问走一遍 MinGW 的
+ * thread_local 取址，单次 noise 从 ~20 ns 涨到 ~114 ns（实测，3x NOISE 那组基准
+ * 向量 352 ns/粒 vs 标量 61）。改成由调用方传引用后，取址只剩一次。</p>
+ */
+WMVM_ALWAYS_INLINE static double value3_in(NoiseCache& c, int64_t seed, double x, double y,
+        double z, int step)
 {
-    NoiseCache& c = g_noise_cache;
     // 三次连续调用只有 step 不同时，这里会命中（firestorm 就是这种写法）
     if (c.valid && c.seed == seed && c.x == x && c.y == y && c.z == z)
     {
@@ -159,6 +176,12 @@ static inline double value3(int64_t seed, double x, double y, double z, int step
     const double y0 = lerp(x00, x10, v);
     const double y1 = lerp(x01, x11, v);
     return lerp(y0, y1, w);
+}
+
+/** 标量内核用的便捷包装：thread_local 取址在这里只发生一次/每次调用 */
+static inline double value3(int64_t seed, double x, double y, double z, int step)
+{
+    return value3_in(g_noise_cache, seed, x, y, z, step);
 }
 
 }  // namespace wmvm

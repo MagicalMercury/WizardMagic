@@ -51,6 +51,9 @@ int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* h
     const V minusOne = Set(d, -1.0);
     const V negZero = Set(d, -0.0);
 
+    // thread_local 的取址只做一次（否则一次 noise 要给十几次访问各付一次代价）
+    ::wmvm::NoiseCache& noiseCache = ::wmvm::g_noise_cache;
+
     // 帧：每个寄存器一个向量，lane 之间互不重叠；调用内复用（先写后读）
     V r[WMVM_MAX_REG];
     for (int i = 0; i < WMVM_MAX_REG; ++i)
@@ -715,7 +718,7 @@ int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* h
                     Store(r[stream], d, ss);
                     for (int l = 0; l < L; ++l)
                     {
-                        out[l] = ::wmvm::value3(seed, xs[l], ys[l], zs[l],
+                        out[l] = ::wmvm::value3_in(noiseCache, seed, xs[l], ys[l], zs[l],
                                 ::wmvm::jround_to_i(ss[l]));
                     }
                     set(dst, LoadU(d, out));

@@ -163,7 +163,10 @@ WmvmProgram* wmvm_program_create(const int32_t* code, int ncode,
         {
             p->prog.lane1_only = true;
         }
-        if (op == wmvm::OP_NOISE || op == wmvm::OP_JZ || op == wmvm::OP_JMP || op == wmvm::OP_JNZ)
+        // 分支才真的把向量内核拖下水：组内分歧时两条路都要跑（实测 0.49×）。
+        // NOISE 曾经也在黑名单里，但那是 value3 没内联的假象——修好之后 noise 是中性的
+        // （3x NOISE 1.0×），混进算术里还能吃到 1.27×，所以放行。
+        if (op == wmvm::OP_JZ || op == wmvm::OP_JMP || op == wmvm::OP_JNZ)
         {
             p->prog.vec_ok = false;
         }

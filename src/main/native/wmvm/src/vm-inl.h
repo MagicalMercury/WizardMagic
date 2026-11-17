@@ -103,10 +103,10 @@ struct Program
     /**
      * 能不能走向量内核。
      *
-     * <p>实测（firestorm）：纯算术 4 lane 是 1.5×，但含 noise 或分支就会掉到 0.6×——
-     * noise 现在还是逐 lane 标量，分支会让组内 lane 分裂进慢路径。所以"按需调用"：
-     * 只有<strong>既没有 noise、也没有分支</strong>的程序才进向量内核，其余留在标量。
-     * 等 noise 向量化 + 谓词化做完，再放宽这个判据。</p>
+     * <p>判据是<b>只有分支</b>（JZ/JMP/JNZ）：组内分歧时两条路都要跑，实测掉到 0.49×。
+     * noise 曾经也在黑名单里，但那是 {@code value3} 没被内联造成的假象（每次调用多付
+     * ~90 ns）——加上 always_inline 之后 noise 是中性（1.0×），混进算术里还能吃到
+     * 1.27×，所以现在放行。实测见 selftest 的 bench 区。</p>
      */
     bool vec_ok = true;
 };
@@ -676,7 +676,8 @@ static inline int run_1lane(const Program& p, WmvmBatch& b, double* fv, const do
                 {
                     const int z = code[pc++];
                     const int stream = code[pc++];
-                    r[d] = value3(seed, r[a], r[bb], r[z], jround_to_i(r[stream]));
+                    r[d] = value3_in(g_noise_cache, seed, r[a], r[bb], r[z],
+                            jround_to_i(r[stream]));
                     break;
                 }
                 case OP_RAND:
