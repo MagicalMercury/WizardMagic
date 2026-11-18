@@ -13,8 +13,10 @@ import net.minecraftforge.common.capabilities.ICapabilitySerializable;
 import net.minecraftforge.common.util.LazyOptional;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 挂在 {@link net.minecraft.world.level.chunk.LevelChunk} 上的四元素场存储。
@@ -76,6 +78,17 @@ public final class ElementFieldStorage
 
     public Collection<ElementField> fields() {
         return sections.values();
+    }
+
+    /**
+     * (section 下标, 元素场) 的只读视图。
+     *
+     * <p>要按 section 计算世界坐标（原点 = {@code minBuildHeight + 下标*16}）的地方必须用这个，
+     * 不能用 {@link #fields()} 的<b>数组下标</b>冒充 section 下标——两者只有在"所有 section 恰好
+     * 连续且 HashMap 迭代顺序恰好升序"时才相等。</p>
+     */
+    public Set<Map.Entry<Integer, ElementField>> sectionEntries() {
+        return Collections.unmodifiableSet(sections.entrySet());
     }
 
     public Map<Integer, ElementField> sectionMap() {

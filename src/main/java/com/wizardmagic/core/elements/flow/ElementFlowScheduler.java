@@ -213,17 +213,25 @@ public final class ElementFlowScheduler
         boolean fluxMode = Config.FLUX_MODE.get();
         double fluxRate = Config.FLUX_RATE.get();
         int fluxLimit = Config.FLUX_LIMIT.get();
-        ElementField[] sectionFields = storage.fields().toArray(new ElementField[0]);
-        for (int si = 0; si < sectionFields.length; si++) {
-            ElementField field = sectionFields[si];
+        final int minY = level.getMinBuildHeight();
+        // 遍历 (section 下标, 元素场)：**必须**用真实的 section 下标。
+        // 这里以前是 `storage.fields().toArray()` 再用数组下标当 section 下标，
+        // 且 originY 写成 `si * 16`（漏了 minBuildHeight）——主世界差 64 格，
+        // 也就是平流一直在用**头顶 64 格处**的流体速度。
+        for (Map.Entry<Integer, ElementField> entry : storage.sectionEntries())
+        {
+            final int si = entry.getKey();
+            ElementField field = entry.getValue();
             boolean dirty = field.isDirty();
             boolean cooled = now - field.getLastStepTick() >= cooldown;
             // 既不脏、也没到冷却 → 完全跳过
-            if (!dirty && !cooled) {
+            if (!dirty && !cooled)
+            {
                 continue;
             }
             anyDirty = true;
-            if (!cooled) {
+            if (!cooled)
+            {
                 continue;
             }
             field.setLastStepTick(now);
@@ -238,7 +246,7 @@ public final class ElementFlowScheduler
 
             // 平流独立于 dirty：流场一直在变，稳态 section 也会被搬运
             BlockPos sectionOrigin = new BlockPos(
-                    pos.getMinBlockX(), si * 16, pos.getMinBlockZ());
+                    pos.getMinBlockX(), minY + si * 16, pos.getMinBlockZ());
             if (ElementAdvection.advect(level, sectionOrigin, field, 1.0)) {
                 fieldChanged = true;
             }
