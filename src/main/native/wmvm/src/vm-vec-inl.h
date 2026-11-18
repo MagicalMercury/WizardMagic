@@ -12,6 +12,19 @@
  * 一次指令分派处理 L 颗粒子；分支一致时掩码全真，几乎没有额外开销。
  */
 
+/*
+ * ⚠️⚠️ 这个文件**绝对不能有 include guard，也不能有 `#pragma once`** ⚠️⚠️
+ *
+ * 它被 vm.cpp 放在 `hwy/foreach_target.h` 的分派循环里，**每个 HWY_TARGET 各 include 一次**
+ * （同一个文件在每个 `hwy::N_XXX` 命名空间里各生成一份 `wmvm_vec`）。
+ * 一旦加上 guard，只有第一个目标能展开，其余目标全部报：
+ *
+ *     vm.cpp:35:12: error: 'wmvm_vec' has not been declared
+ *
+ * 报错位置指在调用点而不是这里，非常难查。（2026-11-18 就被 IDE 自动加的
+ * `#pragma once` 坑过一次：8 个目标全挂。）
+ */
+
 #include <climits>
 #include <cmath>
 #include <cstring>
