@@ -112,12 +112,153 @@ public final class SpellCloud implements SpellStateSource
     private volatile long stepNanos;
 
     /**
+     * **全局**步序号（服务端同一步里所有云相同），由 {@link SpellCloudManager} 写入。
+     *
+     * <p>渲染端用它当快照标号：同一个真实步，所有云的标号一致，于是"播放头 → 每云局部标号"
+     * 的换算不再需要每云各自的锚点。详见 {@link SpellStateSource#stepSeq()}。</p>
+     */
+    private volatile long stepSeq;
+
+    /**
      * 撕裂探针——写窗口序列号，与 {@link #stepEpoch}（步号）语义分离。
      *
      * <p>进入本步写窗口前 +1（奇数 = 写入中），finishStep 收尾后再 +1（偶数 = 本步完成发布）。
      * 只用于读方检测"拷贝期间是否跨越了变异窗口"，不参与任何步进/发布逻辑。</p>
      */
     private volatile int writeSeq;
+
+    // ------------------------------------------------ 诊断：整云"倒退"探针
+    //
+    // 目的：把"多云时个别云运动方向瞬间倒退"这件事从**观感**变成**服务端数据**。
+    // 服务端每步是纯数学推进，正常情况下整块的位移方向不会反号；如果这里测出反号，
+    // 说明数据本身就是"往回走"的，客户端整条直通/插值链路都是无辜的。
+    // 只采样 64 个等距粒子，单步成本 ~1 µs，不参与任何逻辑。
+
+    /** 采样粒子数（等距取，不随机，保证跨步可比） */
+    private static final int MOT_SAMPLES = 64;
+    private final double[] motPx = new double[MOT_SAMPLES];
+    private final double[] motPy = new double[MOT_SAMPLES];
+    private final double[] motPz = new double[MOT_SAMPLES];
+    private final double[] motDx = new double[MOT_SAMPLES];
+    private final double[] motDy = new double[MOT_SAMPLES];
+    private final double[] motDz = new double[MOT_SAMPLES];
+    private boolean motValid;
+    private int motCount = -1;
+    private double motCx;
+    private double motCy;
+    private double motCz;
+    private double motCdX;
+    private double motCdY;
+    private double motCdZ;
+    /** 最近一步：位移方向与上一步反号的采样比例（0..1） */
+    private double motRevFrac;
+    /** 累计：倒退比例 > 50% 的步数 */
+    private long motBackSteps;
+    /** 累计：质心位移方向反号的次数 */
+    private long motCentroidRev;
+
+    /** 最近一步"倒退粒子"的比例（0..1）。诊断用。 */
+    public double motionRevFrac()
+    {
+        return motRevFrac;
+    }
+
+    /** 累计"过半采样粒子倒退"的步数。诊断用。 */
+    public long backwardSteps()
+    {
+        return motBackSteps;
+    }
+
+    /** 累计"质心位移反号"次数。诊断用。 */
+    public long centroidReversals()
+    {
+        return motCentroidRev;
+    }
+
+    /**
+     * 采样一次：比较这一步与上一步的位移方向。
+     *
+     * <p>{@code count} 变了（有粒子湮灭/发射）就整体复位——否则同一个采样下标会指向
+     * 不同粒子，比出来的"倒退"是假的。</p>
+     */
+    private void probeMotion()
+    {
+        final int n = count;
+        if (n < MOT_SAMPLES)
+        {
+            motValid = false;
+            return;
+        }
+        if (n != motCount)
+        {
+            motCount = n;
+            motValid = false;
+        }
+        int rev = 0;
+        int valid = 0;
+        double sx = 0;
+        double sy = 0;
+        double sz = 0;
+        for (int s = 0; s < MOT_SAMPLES; s++)
+        {
+            int i = (int) ((long) s * n / MOT_SAMPLES);
+            double px = x[i];
+            double py = y[i];
+            double pz = z[i];
+            sx += px;
+            sy += py;
+            sz += pz;
+            if (motValid)
+            {
+                double dx = px - motPx[s];
+                double dy = py - motPy[s];
+                double dz = pz - motPz[s];
+                double d2 = dx * dx + dy * dy + dz * dz;
+                double q2 = motDx[s] * motDx[s] + motDy[s] * motDy[s] + motDz[s] * motDz[s];
+                if (d2 > 1.0E-10 && q2 > 1.0E-10)
+                {
+                    valid++;
+                    if (dx * motDx[s] + dy * motDy[s] + dz * motDz[s] < 0)
+                    {
+                        rev++;
+                    }
+                }
+                motDx[s] = dx;
+                motDy[s] = dy;
+                motDz[s] = dz;
+            }
+            motPx[s] = px;
+            motPy[s] = py;
+            motPz[s] = pz;
+        }
+        motRevFrac = valid > 0 ? (double) rev / valid : 0.0;
+        if (valid > 0 && rev * 2 > valid)
+        {
+            motBackSteps++;
+        }
+        double cx = sx / MOT_SAMPLES;
+        double cy = sy / MOT_SAMPLES;
+        double cz = sz / MOT_SAMPLES;
+        if (motValid)
+        {
+            double dx = cx - motCx;
+            double dy = cy - motCy;
+            double dz = cz - motCz;
+            double d2 = dx * dx + dy * dy + dz * dz;
+            double q2 = motCdX * motCdX + motCdY * motCdY + motCdZ * motCdZ;
+            if (d2 > 1.0E-8 && q2 > 1.0E-8 && dx * motCdX + dy * motCdY + dz * motCdZ < 0)
+            {
+                motCentroidRev++;
+            }
+            motCdX = dx;
+            motCdY = dy;
+            motCdZ = dz;
+        }
+        motCx = cx;
+        motCy = cy;
+        motCz = cz;
+        motValid = true;
+    }
 
     @Override
     public int stepEpoch()
@@ -129,6 +270,23 @@ public final class SpellCloud implements SpellStateSource
     public long stepNanos()
     {
         return stepNanos;
+    }
+
+    @Override
+    public long stepSeq()
+    {
+        return stepSeq;
+    }
+
+    /**
+     * 写端：由 {@link SpellCloudManager} 在**本步开始之前**统一写入（同一批云同一个值）。
+     *
+     * <p>放在步进之前写是安全的：读方只有在看到 {@code stepEpoch} 变成新值之后才会读它，
+     * 而 {@code stepEpoch++} 发生在本步全部粒子写入之后（volatile 写，release 语义）。</p>
+     */
+    void publishStepSeq(long seq)
+    {
+        stepSeq = seq;
     }
 
     /** 撕裂探针读端：拷贝前后各读一次并比较奇偶，检测拷贝窗口是否跨越了服务端写窗口 */
@@ -669,6 +827,8 @@ public final class SpellCloud implements SpellStateSource
         try
         {
             finishStepInner();
+            // 诊断：这一步有没有"整块往回走"。放在发布 epoch 之前，位置已经全部写定。
+            probeMotion();
         }
         finally
         {

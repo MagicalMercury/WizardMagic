@@ -535,14 +535,30 @@ public final class SparkBatch
             // shader 侧不做距离淡出（fadeStart≈maxDist），淡出由 CPU 端的半可见 alpha 完成。
             if (spellCount > 0) {
                 float spellRange = (float) com.wizardmagic.core.spell.SpellConstants.RENDER_HARD_RANGE;
-                // 法术区间单独一次 draw，可以有自己的 uPartial：直通模式下是播放时钟的
-                // 段内相位（和实例表里烘焙的那一对快照同一个时钟），光点仍按 tick 相位。
-                float spellPartial = spellSource != null
-                        ? spellSource.spellPartial(partialTick) : partialTick;
-                SparkInstancedRenderer.drawRange(0, spellCount, projection, viewRotation,
-                        (float) cam.x, (float) cam.y, (float) cam.z, time, spellPartial,
-                        spellRange, spellRange * 0.995f, screenScale, targetW, targetH, refScale, tinyPass,
-                        1.0F);
+                // 法术区间按"端点怎么烘焙"拆成两次 draw，各用各的相位源——
+                // 同一个 uPartial 只能服务同一种烘焙语义：
+                //   [0, linked)  端点=快照段两端(0→1)  → 相位 = 播放时钟
+                //   [linked, ..) 端点=tick 半步窗口     → 相位 = partialTick
+                // 以前用全局 LINK_ALL 一刀切，一朵云没连上就会把直通云也切到 tick 相位，
+                // 而端点仍是播放时钟烘焙的整段 ⇒ 两个时钟错配，画面在同一段内 20 Hz 来回扫。
+                int linked = spellSource != null ? spellSource.linkedInstanceCount() : -1;
+                if (linked < 0) {
+                    linked = spellCount;               // 旧接口：整段都用 spellPartial
+                }
+                linked = Math.min(linked, spellCount);
+                float playPartial = spellSource != null ? spellSource.spellPartial(partialTick) : partialTick;
+                if (linked > 0) {
+                    SparkInstancedRenderer.drawRange(0, linked, projection, viewRotation,
+                            (float) cam.x, (float) cam.y, (float) cam.z, time, playPartial,
+                            spellRange, spellRange * 0.995f, screenScale, targetW, targetH, refScale, tinyPass,
+                            1.0F);
+                }
+                if (spellCount - linked > 0) {
+                    SparkInstancedRenderer.drawRange(linked, spellCount - linked, projection, viewRotation,
+                            (float) cam.x, (float) cam.y, (float) cam.z, time, partialTick,
+                            spellRange, spellRange * 0.995f, screenScale, targetW, targetH, refScale, tinyPass,
+                            1.0F);
+                }
             }
             if (sparkCount > 0) {
                 SparkInstancedRenderer.drawRange(spellCount, sparkCount, projection, viewRotation,

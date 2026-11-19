@@ -98,6 +98,13 @@ public final class SpellCloudClient implements SpellInstanceSource
     private long diagNanos;
     private int diagTicks;
     private int diagSteps;
+    /** LINK_ALL 每秒翻脸的次数：>0 就说明同一帧里"端点烘焙语义"和"uPartial 来源"会来回切 */
+    private int linkAllFlips;
+    private boolean lastLinkAll;
+    /** 当前"可见但没连上权威云"的云数（它是 LINK_ALL 变 false 的唯一原因） */
+    private int unlinkedVisible;
+    /** 本帧实例表里前多少个属于"播放时钟组"（直通云）；渲染方据此拆两次 draw */
+    private int diagLinkedInstances;
     private long diagLastStepNanos;
     private double diagGapMin = Double.MAX_VALUE;
     private double diagGapMax;
@@ -643,12 +650,25 @@ public final class SpellCloudClient implements SpellInstanceSource
         int culled = 0;
         float nowTicks = SparkBatch.nowTicks();
 
-        for (ClientCloud c : clouds.values())
+        // 两趟写：先"播放时钟组"（直通云，端点=整段两端），再"tick 组"（镜像云，端点=半步窗口）。
+        // 分组是必须的——同一个 uPartial 只能服务一种烘焙语义，渲染方按 diagLinkedInstances
+        // 把法术区间拆成两次 draw。以前用全局 LINK_ALL 决定烘焙方式，一朵云没连上就会把
+        // 所有直通云切到 tick 相位（端点却还是播放时钟的），那是逐帧级抖动的直接来源。
+        diagLinkedInstances = 0;
+        writePass:
+        for (int pass = 0; pass < 2; pass++)
         {
-            if (!c.visible)
+            for (ClientCloud c : clouds.values())
             {
-                continue;
-            }
+                boolean playClock = c.link != null && ClientCloud.LINK_READY;
+                if (playClock != (pass == 0))
+                {
+                    continue;
+                }
+                if (!c.visible)
+                {
+                    continue;
+                }
             SpellCloud cloud = c.cloud;
             // 与碰撞共用同一个半径：球心停在「表面 ± 半径」，所以画面上刚好贴着表面
             double size = cloud.particleRadius() * c.sizeScale;
@@ -672,19 +692,16 @@ public final class SpellCloudClient implements SpellInstanceSource
             final long gateSeed = seed ^ 0x2545F4914F6CDD1DL;
             // 粒子级剔除快照（每帧一份；null = 还没抓到相机 → 不剔）
             final double[] frustum = ViewFrustum.snapshot();
-            // 本朵云的插值窗口：全直通时直接把段两端（0→1）烘焙进去，相位由播放时钟给；
-            // 混合/镜像模式仍烘焙一个 50 ms 窗口，相位由 partialTick 扫。
+            // 本朵云的插值窗口：**按本云自己的 link 状态**决定，不再看全局 LINK_ALL。
+            // 直通云 → 段两端（0→1），相位由播放时钟给；
+            // 镜像云 → 50 ms 窗口（两个 tick 档），相位由 partialTick 扫。
+            // 两者必须由渲染方分成两次 draw：同一个 uPartial 只能服务同一种烘焙语义。
             final double cf0;
             final double cf1;
-            if (c.link != null && ClientCloud.LINK_ALL)
+            if (c.link != null && ClientCloud.LINK_READY)
             {
                 cf0 = 0.0;
                 cf1 = 1.0;
-            }
-            else if (c.link != null)
-            {
-                cf1 = Math.max(0.0, Math.min(1.0, c.phase));
-                cf0 = Math.max(0.0, cf1 - 0.5);
             }
             else
             {
@@ -762,7 +779,13 @@ public final class SpellCloudClient implements SpellInstanceSource
             }
             if (written >= maxInstances)
             {
-                break;
+                break writePass;
+            }
+            }
+            if (pass == 0)
+            {
+                // 前 diagLinkedInstances 个实例属于"播放时钟组"，渲染方据此拆两次 draw
+                diagLinkedInstances = written;
             }
         }
         diagWritten = written;
@@ -787,10 +810,32 @@ public final class SpellCloudClient implements SpellInstanceSource
             {
                 miss += c.linkMisses;
             }
+            // 每云口径（最多 6 朵）：off = 本云最新标号比全局前沿落后几步；
+            // hold = 播放头走到本云最新快照之外的帧数；skip = 本云因一帧跨两步丢掉的步数。
+            // 这三样是"多云里只有某朵云抖"唯一可能被量到的量（全局计数器对它全瞎）。
+            StringBuilder per = new StringBuilder();
+            int shown = 0;
+            for (ClientCloud c : clouds.values())
+            {
+                if (c.link == null || c.myStep < 0L)
+                {
+                    continue;
+                }
+                if (shown >= 6)
+                {
+                    per.append(" …");
+                    break;
+                }
+                shown++;
+                long label = c.baseGlobal + c.myStep;
+                per.append(String.format(Locale.ROOT, " c%d[off=%d hold=%d skip=%d]",
+                        c.cloud.id, ClientCloud.gFront - label, c.holdFrames, c.epochSkips));
+            }
             LOGGER.info("[wizardmagic] mirror probe: clouds={} linked={} seg={}ms delay={}ms u={} starved={} written={} culled={} kept={} visible={} |"
                             + " inst0 pos=({},{},{}) size={} birth={} life={} phase={} argb={}"
                             + " | cam=({},{},{})"
-                            + " | miss={} discont={} ahead={} skip={} iv={}ms torn={}",
+                            + " | miss={} discont={} ahead={} skip={} iv={}ms torn={} | percloud{}"
+                            + " | dt={}ms jump={} pjump={} all={} flips={} unlink={}",
                     clouds.size(), diagLinked,
                     String.format(Locale.ROOT, "%.0f", diagSegMs),
                     String.format(Locale.ROOT, "%.0f", diagDelayMs),
@@ -808,7 +853,16 @@ public final class SpellCloudClient implements SpellInstanceSource
                     String.format(Locale.ROOT, "%.1f", ViewFrustum.camY()),
                     String.format(Locale.ROOT, "%.1f", ViewFrustum.camZ()),
                     miss, ClientCloud.LINK_DISCONT, ClientCloud.LINK_AHEAD, ClientCloud.LINK_EPOCH_SKIP,
-                    ClientCloud.iv16StatsMs(), ClientCloud.LINK_TORN);
+                    ClientCloud.iv16StatsMs(), ClientCloud.LINK_TORN, per,
+                    String.format(Locale.ROOT, "%.1f", ClientCloud.DBG_DT_MAX_MS),
+                    String.format(Locale.ROOT, "%.3f", ClientCloud.DBG_STEP_JUMP_MAX),
+                    ClientCloud.DBG_PAIR_JUMP_MAX,
+                    ClientCloud.LINK_ALL, linkAllFlips, unlinkedVisible);
+            // 帧级诊断口径清零，下一秒重新统计
+            ClientCloud.DBG_DT_MAX_MS = 0.0;
+            ClientCloud.DBG_STEP_JUMP_MAX = 0.0;
+            ClientCloud.DBG_PAIR_JUMP_MAX = 0L;
+            linkAllFlips = 0;
         }
         // 有可见云却一个实例都没写：一定是剔除/预算出了问题，留一条可诊断的日志。
         // （visible==0 是"全部被视锥剔掉"，那是正常情况，不算问题）
@@ -854,6 +908,22 @@ public final class SpellCloudClient implements SpellInstanceSource
             }
         }
         ClientCloud.LINK_ALL = anyLinked && allLinked;
+        // 诊断：LINK_ALL 一旦翻脸，uPartial 就会在"播放时钟相位"和 MC 的 partialTick 之间切换，
+        // 同时 fill() 烘焙的端点也会从"整段 0→1"切成"[u-0.5, u] 半窗"——那是两条完全不同的
+        // 插值语义混用，会直接产生 20 Hz（partialTick 周期）的位置来回扫。所以必须计数。
+        if (ClientCloud.LINK_ALL != lastLinkAll)
+        {
+            lastLinkAll = ClientCloud.LINK_ALL;
+            linkAllFlips++;
+        }
+        unlinkedVisible = 0;
+        for (ClientCloud c : clouds.values())
+        {
+            if (c.link == null && c.visible)
+            {
+                unlinkedVisible++;
+            }
+        }
         if (!anyLinked)
         {
             return false;
@@ -883,8 +953,10 @@ public final class SpellCloudClient implements SpellInstanceSource
         {
             // 时间轴还没铺开（不足两步快照）：这一帧退回 tick 相位
             ClientCloud.LINK_ALL = false;
+            ClientCloud.LINK_READY = false;
             return false;
         }
+        ClientCloud.LINK_READY = true;
         ClientCloud.LINK_U = phase[0];
         boolean rebuild = false;
         for (ClientCloud c : clouds.values())
@@ -899,7 +971,71 @@ public final class SpellCloudClient implements SpellInstanceSource
                 rebuild = true;
             }
         }
+        // 相位必须**相对实际被画的那一对快照**量，而不是相对播放头段号 k。
+        // 数据没到时 applyPair 只能把配对钉在最新一段（pairStep < k），此时用 k 算出的相位
+        // 会在钉住的那一段上反复扫 0→1（约 10 次/秒 = "方向来回"）；改成相对 pairStep 量，
+        // 相位就会随播放头一起超过 1，被 spellPartial 夹在 1.4 —— 表现为"停在段末等数据"，
+        // 这才是断供时应有的样子。
+        long pairBase = Long.MAX_VALUE;
+        for (ClientCloud c : clouds.values())
+        {
+            if (c.link != null && c.pairStep >= 0L && c.pairStep < pairBase)
+            {
+                pairBase = c.pairStep;
+            }
+        }
+        if (pairBase != Long.MAX_VALUE)
+        {
+            ClientCloud.LINK_U = ClientCloud.gPlay - pairBase;
+        }
+        if (ClientCloud.fdLeft > 0)
+        {
+            frameDump(seg, phase[0]);
+        }
         return rebuild;
+    }
+
+    /**
+     * 逐帧 dump（诊断，默认关）：{@code -Dwizardmagic.spell.framedump=<行数>}。
+     *
+     * <p>现有 probe 是**每秒一行**，对"高频（逐帧级）抖动"完全失明——采到的是什么相位纯看运气。
+     * 这里每帧打一行，直接看：</p>
+     * <ul>
+     *   <li>{@code u} 是否平滑单调（若是，相位没抖）；</li>
+     *   <li>{@code pair}/{@code pair0} 是否逐帧跳跃（配对在换）；</li>
+     *   <li>{@code prev0}/{@code cur0}（固定第 0 颗粒子的两个端点坐标）是否逐帧跳变
+     *       —— 内容跳了就是环槽被覆盖 / 选错槽；</li>
+     *   <li>{@code all}（LINK_ALL）是否在翻脸——它一翻，uPartial 会在"播放时钟相位"和
+     *       MC 的 partialTick 之间来回切，那是**逐帧级**的错相位来源。</li>
+     * </ul>
+     */
+    private void frameDump(long seg, double u)
+    {
+        ClientCloud c = null;
+        for (ClientCloud x : clouds.values())
+        {
+            if (x.link != null)
+            {
+                c = x;
+                break;
+            }
+        }
+        ClientCloud.fdLeft--;
+        if (c == null || c.prevX == null || c.curX == null)
+        {
+            LOGGER.info("[wizardmagic] frame dump: 无直通云");
+            return;
+        }
+        LOGGER.info("[wizardmagic] frame dump: u={} k={} lk={} pair={} w={} all={} front={} "                        + "prev0=({},{},{}) cur0=({},{},{})",
+                String.format(Locale.ROOT, "%.3f", u), seg, seg - c.baseGlobal, c.pairStep,
+                String.format(Locale.ROOT, "%.2f", ClientCloud.gFront - ClientCloud.gPlay),
+                ClientCloud.LINK_ALL, ClientCloud.gFront,
+                String.format(Locale.ROOT, "%.3f", c.prevX[0]),
+                String.format(Locale.ROOT, "%.3f", c.prevY[0]),
+                String.format(Locale.ROOT, "%.3f", c.prevZ[0]),
+                String.format(Locale.ROOT, "%.3f", c.curX[0]),
+                String.format(Locale.ROOT, "%.3f", c.curY[0]),
+                String.format(Locale.ROOT, "%.3f", c.curZ[0]));
     }
 
     /**
@@ -933,14 +1069,30 @@ public final class SpellCloudClient implements SpellInstanceSource
     }
 
     /**
-     * 法术区间的 {@code uPartial}：全直通时用播放时钟的段内相位，否则交回 tick 相位。
+     * 实例表前多少个属于"播放时钟组"（端点整段 0→1 烘焙）。
      *
-     * <p>两段 draw 各用各的——光点（burst）永远是 tick 相位，法术粒子跟服务端时间轴。</p>
+     * <p>渲染方用它把法术区间拆成两次 draw：前段用播放时钟相位，后段用 {@code partialTick}。
+     * 这样一朵云没连上、或者时间轴还没铺开，都不会污染别的云的相位。</p>
+     */
+    @Override
+    public int linkedInstanceCount()
+    {
+        return ClientCloud.LINK_READY ? diagLinkedInstances : 0;
+    }
+
+    /**
+     * "播放时钟组"实例的 {@code uPartial}：播放时钟的段内相位。
+     *
+     * <p><b>判据是 {@link ClientCloud#LINK_READY}，不是 LINK_ALL</b>：端点按整段 0→1 烘焙的
+     * 那批实例（见 {@link #linkedInstanceCount()}）必须配播放时钟相位；同一帧里如果混进了
+     * 镜像云，它们走另一次 draw、用 {@code partialTick}。以前这里用全局 LINK_ALL，
+     * 一朵云没连上就会让**所有**直通云改用 tick 相位，而端点仍是播放时钟烘焙的整段
+     * ——两个时钟错配，画面在同一段内 20 Hz 来回扫。</p>
      */
     @Override
     public float spellPartial(float partialTick)
     {
-        if (!ClientCloud.LINK_ALL)
+        if (!ClientCloud.LINK_READY)
         {
             return partialTick;
         }
@@ -1642,6 +1794,8 @@ public final class SpellCloudClient implements SpellInstanceSource
         private static int iv16Idx;
         private static int iv16Fill;
         static long gStep = -1L;
+        /** 已喂过时间轴的最大全局步号（去重判据） */
+        static long gSeq = Long.MIN_VALUE;
         /** 派生前沿 = 所有已抓拍云的 baseGlobal + myStep 的最大值（myStep=-1 的云不参与；-1 = 还没有任何云抓拍过）。
          *  伺服前沿改用它：按"实际抓到的步数"推进，一朵云一帧连抓两步（追帧爆发）也如实 +2；
          *  gStep 只剩诊断用途——feedTimeline 的按时间去重会吞步，不再适合当播放前沿。 */
@@ -1656,6 +1810,26 @@ public final class SpellCloudClient implements SpellInstanceSource
         // 用户看到的就是"每段末减速、突然变到下一段"。
         /** 播放头位置，单位=步（1 步=100ms 仿真）；哨兵 NEGATIVE_INFINITY 表示未初始化 */
         static double gPlay = Double.NEGATIVE_INFINITY;
+        // ------------------------------------------------ 帧级诊断（1 秒窗口内的最大值）
+        //
+        // 现有计数器都是"秒级采样"，而"位置某一帧被推了一下"完全可能被 1 秒的采样漏掉。
+        // 这三个量专治这件事：帧间隔、单帧播放头推进、单云配对跳变。
+        /** 本秒内最大的帧间隔（毫秒）。60fps ≈ 16.7；出现 100+ 说明有一帧真的卡住了 */
+        static double DBG_DT_MAX_MS;
+        /** 本秒内单帧播放头推进的最大值（步）。正常 = rate×dt/100 ≈ 0.17；≈1 就是一帧跳了一整段 */
+        static double DBG_STEP_JUMP_MAX;
+        /** 本秒内单云配对标号的非 +1 跳变最大值（段）。>1 = 跳过了整整一段数据 */
+        static long DBG_PAIR_JUMP_MAX;
+        /**
+         * 逐帧 dump 剩余行数。三种触发方式：
+         * <ul>
+         *   <li>手动：{@code -Dwizardmagic.spell.framedump=<行数>}（进游戏就开始打）；</li>
+         *   <li><b>自动</b>：某朵云出现"供不上播放头"（{@code lk > 本云最新标号}）时自动武装 180 行
+         *       —— 也就是抖动发生的当下，不需要任何开关；</li>
+         *   <li>0 = 关。</li>
+         * </ul>
+         */
+        static int fdLeft = Integer.getInteger("wizardmagic.spell.framedump", 0);
         /** 上一帧的 nanoTime（算帧间 dt 用） */
         static long gLastNow;
         /** 目标水位（步）：播放头常驻落后最新快照 1.6 步 ≈ 160ms，到达抖动全靠这段缓冲吸收 */
@@ -1668,15 +1842,17 @@ public final class SpellCloudClient implements SpellInstanceSource
         static final double GAIN = 0.3;
         /** 播放头落后硬锚阈值（步）：落后超过 3.2 步即掉出 4 槽环覆盖，直接锚回目标水位 */
         static final double W_MAX = 3.2;
-        /** 本帧全部可见云都走直通（决定 uPartial 用播放时钟还是 partialTick） */
+        // 本帧全部可见云都走直通（决定 uPartial 用播放时钟还是 partialTick）
         static boolean LINK_ALL;
+        /** 播放时钟本帧可用（时间轴已铺开）。它才是"端点烘焙 + 相位来源"的唯一判据：
+         *  端点按整段 0→1 烘焙的云必须配播放时钟相位，不能用 partialTick。 */
+        static boolean LINK_READY;
         /** 本帧 shader 用的 uPartial（段内相位） */
         static double LINK_U;
         /** 外推上限（相位 > 1 = 沿段方向线性外推；0.4 段 ≈ 40 ms） */
         static final double U_MAX = 1.4;
         /** 播放时刻越过最新快照的帧数（诊断：正常应恒为 0） */
-        static long LINK_STARVED;
-        /** applyPair 扫描中撞上环内相邻槽步号断档的次数（诊断：中间那步被漏抓/撕裂的频率，正常应恒为 0） */
+        static long LINK_STARVED;        /** applyPair 扫描中撞上环内相邻槽步号断档的次数（诊断：中间那步被漏抓/撕裂的频率，正常应恒为 0） */
         static long LINK_DISCONT;
         /** applyPair 兜底选中的段超前于播放头的次数（诊断：画面瞬间前跳再回跳的坏情况，正常应恒为 0） */
         static long LINK_AHEAD;
@@ -1725,6 +1901,11 @@ public final class SpellCloudClient implements SpellInstanceSource
         /** 本云首个快照对应的全局步号（全局 = 派生前沿 gFront 的坐标系）；
          *  环槽局部号 + baseGlobal = 全局号，applyPair 靠它把全局播放段号换算回本云局部号 */
         long baseGlobal = 0L;
+        /** 本云累计因"一帧跨两步"而丢掉的步数（全局 skip 只是求和，这里分云——多云随机抖动的第一嫌疑） */
+        long epochSkips;
+        /** 播放头已经走到本云**最新快照之外**的帧数：本云供不上，旧对会被冻住而 u 继续绕圈
+         *  ⇒ 位置在同一段内来回扫 = 视觉上的"方向瞬间倒退"。这是现有计数器唯一的盲区。 */
+        long holdFrames;
 
         // 体素密度网格（复用，避免每步分配）
         int[] vox;
@@ -1906,32 +2087,30 @@ public final class SpellCloudClient implements SpellInstanceSource
                     {
                         // 这一次抓拍跨过了 delta-1 步 = 之前的抓拍网格漏掉了这么多步
                         LINK_EPOCH_SKIP += delta - 1L;
+                        // 分云口径：多云时"哪朵云在丢步"才是随机的那个量
+                        epochSkips += delta - 1L;
                     }
                     linkEpoch = e2;
                     // stepNanos 在 epoch 之前写；e1==e2 才能保证它属于这一份数据
                     arrive = src.stepNanos();
+                    long seq = src.stepSeq();
                     ringHead = slot;
                     if (ringSize < RING)
                     {
                         ringSize++;
                     }
-                    feedTimeline(arrive);
-                    // 环槽标号改用本云自己的抓拍计数 myStep（每次成功抓拍必然 +1），与 feedTimeline
-                    // 的按时间去重彻底解耦：去重吞掉 gStep++ 时环里不再出现两个同号槽；帧间隔
-                    // 吞两步时一次抓拍跨两步（delta=2，由 skip 计数器量化），标号仍 +1。
-                    // 首抓锚定：baseGlobal = 帧开始前沿 + 1（frameTick 在抓拍循环前已刷新 gFront，
-                    // 首抓这一步的全局号就是它 +1）；若本方法由 tick() 的兜底路径调用（那里没有
-                    // 刷新过 gFront），首抓就按当前 gFront + 1 锚定——降级路径允许近似。
-                    if (myStep < 0L)
-                    {
-                        baseGlobal = gFront + 1L;
-                        myStep = 0L;
-                    }
-                    else
-                    {
-                        myStep++;
-                    }
-                    ringStep[slot] = myStep;
+                    feedTimeline(arrive, seq);
+                    // 环槽标号 = **服务端全局步号**（同一步所有云同号）。
+                    //
+                    // 以前用"本云被抓拍了几次"（myStep）+ 首抓锚一个 baseGlobal = gFront+1：
+                    // 后放的云锚得比老云高 1 步，于是 N 朵云同场时每朵云渲染的真实步号相差
+                    // 1..N-1 步（实测 4 朵云：off = 3/2/1/0）。一旦播放头领先某朵云的数据，
+                    // applyPair 只能把配对钉在它最新的一段上，而相位继续按 100ms 扫 →
+                    // 那朵云的画面就"向前冲一段、再向后弹回"，约 10 次/秒。
+                    // 用全局步号后 baseGlobal 恒 0、off 恒 0，这类分叉在构造上不存在。
+                    myStep = seq;
+                    baseGlobal = 0L;
+                    ringStep[slot] = seq;
                     // 包围盒跟着新快照重算（渲染预算/剔除用）
                     recomputeBoundsOf(ringX[slot], ringY[slot], ringZ[slot]);
                     // 本地只负责"到点消失"：年龄跟着走，isDead() 才能和权威方同时生效。
@@ -1987,6 +2166,18 @@ public final class SpellCloudClient implements SpellInstanceSource
             // k 是全局播放段号（gFront 坐标系），环槽标号 ringStep 是本云局部号（myStep 域），
             // 差值就是 baseGlobal——先换算成本云局部号，之后的扫描/比较全在局部坐标系里。
             long lk = k - baseGlobal;
+            // 诊断：播放头已经走到本云**最新快照之外**。这一刻本云供不上，选中的旧对会被冻住，
+            // 而 u 仍按墙钟 0→1 绕圈 ⇒ 位置在同一段内来回扫（视觉 = 方向瞬间倒退）。
+            // 这条路径在 starved/ahead/discont 里都是静默的，所以必须单独计数。
+            if (lk > ringStep[ringHead])
+            {
+                holdFrames++;
+                // 零配置取证：抖动发生的当下自动开逐帧 dump（3 秒），下次复现就能拿到逐帧数据
+                if (fdLeft <= 0)
+                {
+                    fdLeft = 180;
+                }
+            }
             // 从最新往回找一对**步号连续**的槽，取包含 k 的那一段；找不到就退到最老的一段。
             // （步号不连续 = 中间那一步被 seqlock 丢了，这种不能当段用，否则位置会跳一格）
             int bestA = -1;
@@ -2026,6 +2217,11 @@ public final class SpellCloudClient implements SpellInstanceSource
             {
                 return false;
             }
+            // 帧级诊断：配对一次前进超过 1 段 = 中间有段数据被跳过了（画面会瞬间冲一下）
+            if (pairStep >= 0L && start - pairStep > DBG_PAIR_JUMP_MAX)
+            {
+                DBG_PAIR_JUMP_MAX = start - pairStep;
+            }
             prevX = ringX[bestA];
             prevY = ringY[bestA];
             prevZ = ringZ[bestA];
@@ -2063,17 +2259,19 @@ public final class SpellCloudClient implements SpellInstanceSource
         }
 
         /**
-         * 收到一步新的权威状态：记下它的**真实到达时刻**，并更新延迟估计。
+         * 收到一步新的权威状态：记下它的**真实到达时刻**，并更新段长/间隔统计（纯诊断）。
          *
-         * <p>同一步里每朵云各有自己的 {@code stepNanos}（相差微秒级），必须用容差去重，
-         * 否则云一多时间轴会被喂成"一步 N 段"：SEG 塌到下限、gStep 飞跑。</p>
+         * <p>去重从"时间戳容差（0.25×SEG≈25ms）"改成**全局步号**：同一步里 N 朵云各自
+         * {@code stepNanos} 相差可达毫秒级，容差判据既会漏（雨后追帧时真步被吞，gStep 少走）
+         * 也会重（跨云偏差超过容差时同一步喂两次）。步号是精确的整数判据，两头都不会错。</p>
          */
-        private static void feedTimeline(long arrive)
+        private static void feedTimeline(long arrive, long seq)
         {
-            if (arrive - gArrive < (long) (SEG * 0.25))
+            if (seq <= gSeq)
             {
-                return;
+                return;                  // 同一步（或更旧）已经喂过
             }
+            gSeq = seq;
             if (gStep < 0L)
             {
                 gStep = 0L;
@@ -2172,11 +2370,20 @@ public final class SpellCloudClient implements SpellInstanceSource
             // 帧间 dt（毫秒）；首次初始化后 dt=0，本帧不推进
             double dtMs = (nowNanos - gLastNow) / 1.0e6;
             gLastNow = nowNanos;
+            if (dtMs > DBG_DT_MAX_MS)
+            {
+                DBG_DT_MAX_MS = dtMs;
+            }
             // 水位伺服：水位偏离 W_TARGET 时按比例修正速率（钳在 [RATE_MIN, RATE_MAX]）；
             // 前沿用派生 gFront（实际抓到的步数），与 feedTimeline 去重是否吞步无关
             double w = gFront - gPlay;
             double rate = 1.0 + Math.max(RATE_MIN - 1.0, Math.min(RATE_MAX - 1.0, (w - W_TARGET) * GAIN));
-            gPlay += rate * dtMs / 100.0;
+            double advance = rate * dtMs / 100.0;
+            if (advance > DBG_STEP_JUMP_MAX)
+            {
+                DBG_STEP_JUMP_MAX = advance;   // 单帧推进超过 ~0.3 步 = 那一帧位置被推了一下
+            }
+            gPlay += advance;
             // 断供夹：播放头越过最新快照 0.4 步就按住（0.4 与 U_MAX=1.4 对齐：pair (gFront-1,gFront) 的 u 到 1.4）
             if (gPlay > gFront + 0.4)
             {

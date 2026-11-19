@@ -30,6 +30,22 @@ public interface SpellInstanceSource
     }
 
     /**
+     * 实例表**前多少个实例属于"播放时钟组"**（端点按整段 0→1 烘焙，相位由
+     * {@link #spellPartial(float)} 提供）。
+     *
+     * <p>为什么需要这个：插值的"端点怎么烘焙"和"相位用哪个时钟"必须是同一个时钟。
+     * 直通云的端点是整段两端 + 播放时钟相位；镜像云（自己跑 VM）的端点是 tick 0.5 步的两档
+     * + MC 的 {@code partialTick}。两者混在同一个 drawRange 里必然错相位（历史上就是这么抖的），
+     * 所以渲染方按这个下标把法术区间拆成两次 draw，各用各的相位。</p>
+     *
+     * @return {@code >= 0} 混合组的分界；{@code -1} = 全部用 {@link #spellPartial(float)}（旧行为）
+     */
+    default int linkedInstanceCount()
+    {
+        return -1;
+    }
+
+    /**
      * 每帧调用一次（在 {@link SparkBatch#render} 重建判定之前）：推进"播放时间轴"。
      *
      * <p>只有同进程直通（单人 / 局域网主机的这台机器）会用到：那时快照的到达时刻是抖的

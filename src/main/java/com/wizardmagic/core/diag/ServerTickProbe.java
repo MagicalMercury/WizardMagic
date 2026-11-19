@@ -76,6 +76,27 @@ public final class ServerTickProbe
         JOBS.computeIfAbsent(name, k -> new long[2])[1]++;
     }
 
+    /** 本窗口内取最大值的自由文本口径（例如"倒退粒子比例"，单位由调用方约定） */
+    private static final Map<String, long[]> REPORT = new LinkedHashMap<>(4);
+    private static final Map<String, String> REPORT_TEXT = new LinkedHashMap<>(4);
+
+    /**
+     * 报一个"越大越说明问题"的值：窗口内保留最大值，以及取到最大值时的那条文字。
+     *
+     * @param name  口径名
+     * @param value 用于比较大小的数值（打印原样）
+     * @param text  附加说明，打印在数值后面
+     */
+    public static void reportMax(String name, long value, String text)
+    {
+        long[] e = REPORT.computeIfAbsent(name, k -> new long[]{Long.MIN_VALUE});
+        if (value >= e[0])
+        {
+            e[0] = value;
+            REPORT_TEXT.put(name, text);
+        }
+    }
+
     /** 法术步（10 Hz）：兼作"这一秒要不要打印"的开关。 */
     public static void noteSpellStep(long nanos)
     {
@@ -160,6 +181,14 @@ public final class ServerTickProbe
                     sb.append(String.format(Locale.ROOT, " | %s n=%d", e.getKey(), e.getValue()[1]));
                 }
             }
+            for (Map.Entry<String, long[]> e : REPORT.entrySet())
+            {
+                if (e.getValue()[0] != Long.MIN_VALUE)
+                {
+                    sb.append(String.format(Locale.ROOT, " | %s max=%d %s",
+                            e.getKey(), e.getValue()[0], REPORT_TEXT.getOrDefault(e.getKey(), "")));
+                }
+            }
             com.mojang.logging.LogUtils.getLogger().info(sb.toString());
         }
         ticks = 0;
@@ -175,6 +204,11 @@ public final class ServerTickProbe
             v[0] = 0L;
             v[1] = 0L;
         }
+        for (long[] v : REPORT.values())
+        {
+            v[0] = Long.MIN_VALUE;
+        }
+        REPORT_TEXT.clear();
         windowStart = now;
     }
 

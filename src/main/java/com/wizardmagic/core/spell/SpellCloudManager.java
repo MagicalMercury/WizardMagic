@@ -84,7 +84,8 @@ public final class SpellCloudManager
     private static int sampleCount;
     private static int sampleCursor;
     private static long lastStepNanos;
-
+    /** 全局步序号（每跑完一批步 +1，同批所有云同号）。渲染端的快照标号用它。 */
+    private static long STEP_SEQ;
     private SpellCloudManager()
     {
     }
@@ -281,6 +282,13 @@ public final class SpellCloudManager
             }
             if (!list.isEmpty())
             {
+                // 全局步号：同一批里的所有云这一步共用同一个序号。渲染端用它当快照标号，
+                // 于是"播放头 → 每云局部标号"的换算不再需要每云各自的锚点（见 SpellStateSource#stepSeq）。
+                long seq = ++STEP_SEQ;
+                for (SpellCloud c : list)
+                {
+                    c.publishStepSeq(seq);
+                }
                 SpellBatch.step(list);
                 // 步进之后处理 tick / on hit 里的 emit：这一步攒下的请求现在才生成子云
                 // （必须等所有云的粒子区间 join 完，否则边跑边加会撕裂列表）
@@ -333,6 +341,26 @@ public final class SpellCloudManager
             recordSample(lastStepNanos);
             // tick 探针：把"法术步"这个 10 Hz 的口径并进去（缺席的一秒 = 没有法术在跑）
             com.wizardmagic.core.diag.ServerTickProbe.noteSpellStep(lastStepNanos);
+            // 诊断：本步"整云倒退"最严重的云。服务端是纯数学推进，正常不该反号；
+            // 这里涨 => 数据本身在往回走，客户端那条链路无辜（见 plan/random-stutter-analysis-*）。
+            double worstFrac = 0.0;
+            long worstId = -1L;
+            long cRev = 0L;
+            long backSteps = 0L;
+            for (SpellCloud c : list)
+            {
+                double f = c.motionRevFrac();
+                if (f > worstFrac)
+                {
+                    worstFrac = f;
+                    worstId = c.id;
+                }
+                cRev += c.centroidReversals();
+                backSteps += c.backwardSteps();
+            }
+            com.wizardmagic.core.diag.ServerTickProbe.reportMax("srvBack",
+                    Math.round(worstFrac * 1000.0),
+                    "(c" + worstId + ") cRev=" + cRev + " back=" + backSteps);
         }
 
         // 可见性核对：进入范围补发、离开范围移除
