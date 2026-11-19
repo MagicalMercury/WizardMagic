@@ -38,6 +38,8 @@ public final class ServerTickProbe
 {
     /** 强制每秒打印（否则只在有法术在跑的那一秒打印） */
     private static final boolean ALWAYS = Boolean.getBoolean("wizardmagic.tickprobe");
+    /** 总开关：默认不打；{@code -Dwizardmagic.diag=1} 或 {@code -Dwizardmagic.tickprobe=1} 才打 */
+    private static final boolean ON = Boolean.getBoolean("wizardmagic.diag") || ALWAYS;
 
     /** 具名任务在本窗口内的 [最大耗时 ns, 次数] */
     private static final Map<String, long[]> JOBS = new LinkedHashMap<>(8);
@@ -163,7 +165,7 @@ public final class ServerTickProbe
 
     private static void flush(long now)
     {
-        if (ticks > 0 && (ALWAYS || spellSteps > 0))
+        if (ON && ticks > 0 && spellSteps > 0)
         {
             StringBuilder sb = new StringBuilder(192);
             sb.append(String.format(Locale.ROOT, "[wizardmagic] srv tick: n=%d gap %s | intick %s",

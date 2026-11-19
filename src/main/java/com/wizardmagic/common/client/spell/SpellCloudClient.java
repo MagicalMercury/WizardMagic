@@ -71,6 +71,8 @@ public final class SpellCloudClient implements SpellInstanceSource
      * 一次就能看出是时钟被撬、还是步进/相位错格。</p>
      */
     private static final boolean DIAG = System.getProperty("wizardmagic.script.debug") != null;
+    /** 1/s 级诊断日志（mirror probe、逐帧 dump）的总开关：{@code -Dwizardmagic.diag=1} */
+    private static final boolean diagOn = Boolean.getBoolean("wizardmagic.diag");
 
     /**
      * 同进程直通开关（单人游戏）：{@code -Dwizardmagic.spell.link=0} 关掉。
@@ -801,7 +803,7 @@ public final class SpellCloudClient implements SpellInstanceSource
         // 临时探针：每秒一行，把"写进去的第一个实例"原样打出来。
         // 用来回答"到底是没写、写飞了、还是写了但画不出来"。
         long nowMs = System.currentTimeMillis();
-        if (nowMs - lastProbeLog > 1000L && !clouds.isEmpty())
+        if (diagOn && nowMs - lastProbeLog > 1000L && !clouds.isEmpty())
         {
             lastProbeLog = nowMs;
             // H1 取证（只读不改行为）：linkMisses 是每朵云的实例字段，probe 是全局视角，这里求和。
@@ -2173,7 +2175,7 @@ public final class SpellCloudClient implements SpellInstanceSource
             {
                 holdFrames++;
                 // 零配置取证：抖动发生的当下自动开逐帧 dump（3 秒），下次复现就能拿到逐帧数据
-                if (fdLeft <= 0)
+                if (fdLeft <= 0 && diagOn)
                 {
                     fdLeft = 180;
                 }
