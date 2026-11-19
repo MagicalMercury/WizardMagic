@@ -1,6 +1,10 @@
 /*
  * Java 数学语义的端口：类型转换、floor、round、min/max 的边界行为。
  *
+ * <p><b>位置说明</b>：这个头文件是 {@code wmvm/}（法术 VM）和 {@code element/}
+ * （元素场）<b>共用</b>的，所以放在 {@code native/} 根下、由根 CMakeLists 用
+ * {@code include_directories} 统一暴露。别把它塞回某个模块里。</p>
+ *
  * 这些地方 C++ 的默认语义与 Java 不同，写错就是 1 ulp 起步的静默分叉：
  *   - `(int) double`：Java 是饱和转换（NaN→0，越界→MIN/MAX）；C++ 强转是 UB。
  *   - `Math.floor(double)`：两边都精确，直接对应。

@@ -53,8 +53,38 @@ public final class SparkBatch
     private double camY;
     private double camZ;
     private boolean camValid;
-    /** 每帧最多绘制多少个实例：法术特效优先，超限时元素光点整组让位 */
-    private static final int MAX_DRAW = 262144;
+    /**
+     * 每帧最多绘制多少个实例：法术特效优先，超限时元素光点整组让位。
+     *
+     * <p>默认 262144（= BURST_CAPACITY）。想验证"不抽稀、直接多画"的代价时用
+     * {@code -Dwizardmagic.mirror.maxDraw=393216} 放开（上限是整个实例表
+     * {@link #CAPACITY}，再高没有 buffer 可用）。注意：放大到超过
+     * {@link #BURST_CAPACITY} 之后，法术镜像会挤占普通火花的名额。</p>
+     */
+    private static final int MAX_DRAW = resolveMaxDraw();
+
+    private static int resolveMaxDraw()
+    {
+        int v = 262144;
+        String s = System.getProperty("wizardmagic.mirror.maxDraw");
+        if (s != null)
+        {
+            try
+            {
+                v = Integer.parseInt(s.trim());
+            }
+            catch (NumberFormatException ignored)
+            {
+                v = 262144;
+            }
+        }
+        return Math.max(65536, Math.min(CAPACITY, v));
+    }
+
+    /** 每帧实例表上限（渲染预算）。法术镜像按这个数字做配额分配。 */
+    public static int maxDraw() {
+        return MAX_DRAW;
+    }
     /** 排序间隔（tick）：0 表示已失效 */
     private int sortTimer;
     private final int[] sortOrder = new int[CAPACITY];
@@ -405,7 +435,8 @@ public final class SparkBatch
 
     /** 渲染所有光点（RenderLevelStageEvent.AFTER_WEATHER） */
     public void render(Camera camera, float partialTick) {
-        if (burstCount + persistCount == 0 && spellCount == 0) {
+        if (burstCount + persistCount == 0 && spellCount == 0
+                && (spellSource == null || !spellSource.wantsDraw())) {
             return;
         }
         if (!SparkGlProgram.ensure()) {
@@ -422,6 +453,11 @@ public final class SparkBatch
         camZ = cam.z;
         camValid = true;
 
+        // 播放时钟每帧都要推进：段边界可能落在两个 tick 之间，漏了就得靠外推补救。
+        // 返回 true 只发生在段边界（约 10 Hz）——那一刻才重建实例表，段内只换 uniform。
+        if (spellSource != null && spellSource.frameTick()) {
+            rebuildInstances();
+        }
         if (instanceDirty) {
             SparkInstancedRenderer.upload(instanceData, instanceCount);
             instanceDirty = false;
@@ -499,8 +535,12 @@ public final class SparkBatch
             // shader 侧不做距离淡出（fadeStart≈maxDist），淡出由 CPU 端的半可见 alpha 完成。
             if (spellCount > 0) {
                 float spellRange = (float) com.wizardmagic.core.spell.SpellConstants.RENDER_HARD_RANGE;
+                // 法术区间单独一次 draw，可以有自己的 uPartial：直通模式下是播放时钟的
+                // 段内相位（和实例表里烘焙的那一对快照同一个时钟），光点仍按 tick 相位。
+                float spellPartial = spellSource != null
+                        ? spellSource.spellPartial(partialTick) : partialTick;
                 SparkInstancedRenderer.drawRange(0, spellCount, projection, viewRotation,
-                        (float) cam.x, (float) cam.y, (float) cam.z, time, partialTick,
+                        (float) cam.x, (float) cam.y, (float) cam.z, time, spellPartial,
                         spellRange, spellRange * 0.995f, screenScale, targetW, targetH, refScale, tinyPass,
                         1.0F);
             }

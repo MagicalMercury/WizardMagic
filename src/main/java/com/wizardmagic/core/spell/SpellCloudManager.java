@@ -258,6 +258,8 @@ public final class SpellCloudManager
     {
         if (level.getGameTime() % SpellConstants.STEP_TICKS != 0)
         {
+            // 非步进 tick 也要把权威快照刷一下（云可能在上一 tick 生成/销毁）
+            publishAuthoritative();
             return;
         }
         List<SpellCloud> list = CLOUDS.get(level.dimension());
@@ -329,6 +331,8 @@ public final class SpellCloudManager
                 }
             }
             recordSample(lastStepNanos);
+            // tick 探针：把"法术步"这个 10 Hz 的口径并进去（缺席的一秒 = 没有法术在跑）
+            com.wizardmagic.core.diag.ServerTickProbe.noteSpellStep(lastStepNanos);
         }
 
         // 可见性核对：进入范围补发、离开范围移除
@@ -336,6 +340,50 @@ public final class SpellCloudManager
         {
             syncVisibility(level);
         }
+        // 同进程直通（单人游戏）：把这一步之后的权威云列表发布出去，供渲染线程读
+        publishAuthoritative();
+    }
+
+    // -------------------------------------------------------- 同进程直通（单人游戏）
+
+    /**
+     * 权威云快照（跨线程只读）。服务端线程每 tick 换一次引用，渲染线程整份读。
+     *
+     * <p>为什么用"整份替换的不可变列表"而不是给 {@link #CLOUDS} 加锁：云的生命周期只有
+     * 服务端线程改，渲染线程只需要"看到某一时刻的成员集合"；{@code volatile} 换引用就够了，
+     * 哈希表本身永远不被渲染线程碰。粒子数组之间的一致由每朵云自己的
+     * {@link SpellStateSource#stepEpoch()}（seqlock）保证——两层各管各的，不用锁。</p>
+     */
+    private static volatile List<SpellCloud> AUTHORITATIVE = java.util.List.of();
+
+    private static void publishAuthoritative()
+    {
+        List<SpellCloud> flat = new ArrayList<>();
+        for (List<SpellCloud> list : CLOUDS.values())
+        {
+            flat.addAll(list);
+        }
+        AUTHORITATIVE = flat;
+    }
+
+    /**
+     * 同进程直通：按 id 找权威云；找不到返回 {@code null}（多人游戏、或云已销毁）。
+     *
+     * <p>客户端镜像用它判断"这朵云能不能直接读服务端状态、跳过整段物理"。
+     * 跨维度也没问题——id 全局自增，不可能重号。</p>
+     */
+    public static SpellCloud authoritative(int cloudId)
+    {
+        List<SpellCloud> snapshot = AUTHORITATIVE;
+        for (int i = 0, n = snapshot.size(); i < n; i++)
+        {
+            SpellCloud cloud = snapshot.get(i);
+            if (cloud.id == cloudId)
+            {
+                return cloud;
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------ 清理

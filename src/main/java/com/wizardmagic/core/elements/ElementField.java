@@ -198,6 +198,24 @@ public final class ElementField implements INBTSerializable<CompoundTag>
         return hasBarrier;
     }
 
+    /**
+     * 原生平流内核直接读这张位图（64 个 long，1 bit = 完全阻断）。
+     *
+     * <p><b>只读</b>：外面不要改它，否则和 {@link #setPermeability} 维护的状态不一致。</p>
+     */
+    public long[] blockedBits() {
+        return blocked;
+    }
+
+    /**
+     * 原生平流内核用的逐格通透度数组；可能是 {@code null}（等价于处处 127）。
+     *
+     * <p><b>只读</b>，理由同上。</p>
+     */
+    public byte[] permeabilityBytes() {
+        return permeability;
+    }
+
     /** 该格是否被完全阻断（通透度 0） */
     public boolean isBlocked(int index) {
         return hasBarrier && (blocked[index >> 6] & (1L << (index & 63))) != 0;

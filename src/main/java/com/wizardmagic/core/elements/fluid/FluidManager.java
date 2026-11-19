@@ -70,6 +70,7 @@ public final class FluidManager {
         }
 
         // 1) 背景风：curl-noise，离散无散，直接覆写基础速度场
+        long probeStart = System.nanoTime();
         FluidBackground.apply(field, t * 0.05);
         // 2) 地形：固体格的六个面通量清零（缓存，域不变不重扫）
         FluidMask.update(serverLevel, field);
@@ -78,6 +79,8 @@ public final class FluidManager {
         FluidForces.apply(serverLevel, field);
         // 4) 投影（只作用在扰动上；背景风已在零空间里）
         FluidSolver.solve(field);
+        // tick 探针：这一个 1 Hz 任务整体占了多少（它是"每秒一次数据缺口"的头号嫌疑之一）
+        com.wizardmagic.core.diag.ServerTickProbe.note("fluid1Hz", System.nanoTime() - probeStart);
     }
 
     /** 取指定维度的域（元素平流、光晕广播按各自的 level 调用）。 */

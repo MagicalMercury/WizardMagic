@@ -1,18 +1,14 @@
 package com.wizardmagic.core.spell.script;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.Locale;
+import com.wizardmagic.core.jni.NativeLibrary;
 
 /**
- * 原生内核（C++/SIMD）的 JNI 桥。
+ * 法术寄存器机原生内核的 JNI 桥。
  *
- * <p><b>设计</b>：只有"加载库 + 传数组"两件事，不做任何业务判断。找不到库、架构不对、
- * 版本对不上，一律返回 {@link #available()} = false，调用方回退到 Java 的 {@link RegVm}。
- * 所以<strong>不装原生库也能玩</strong>，只是慢。</p>
+ * <p><b>设计</b>：只做"传数组、收返回码"，不做任何业务判断。库的加载、目标/lane 查询、
+ * 最后的错误串都在中立的 {@link NativeLibrary} 里（一个 JVM 只能 {@code System.load} 一次，
+ * 元素场也共用这份 DLL）。库不在就 {@link #available()} = false，调用方回退到 Java 的
+ * {@link RegVm}——<strong>不装原生库也能玩</strong>，只是慢。</p>
  *
  * <p><b>数组方向</b>：粒子的 SoA 数组用 {@code GetPrimitiveArrayCritical} 钉住，零拷贝；
  * 出参（px/py/pz/vx/vy/vz/energy/fv）由 native 原地改，入参（anchor/axis/target/rnd/hv）只读。</p>
@@ -22,59 +18,30 @@ import java.util.Locale;
  */
 public final class NativeVm
 {
-    private static final String LIB_RESOURCE =
-            "/wizardmagic/native/windows/x86_64/wmvm.dll";
-
     /** 加载失败的原因（人话），成功后为 null */
     private static final String LOAD_ERROR;
     /** 诊断/自检用的强制开关；null = 跟随系统属性 */
     private static volatile Boolean FORCED;
     private static final boolean LOADED;
-    private static final String TARGET;
-    private static final int LANES;
 
     static
     {
         String error = null;
         boolean loaded = false;
-        String target = "java";
-        int lanes = 0;
-        try
+        if (!NativeLibrary.available())
         {
-            load();
-            if (nativeInit() != 0)
-            {
-                error = "wmvm_init 返回非 0";
-            }
-            else if (nativeSetSinTable(com.wizardmagic.api.spell.SpellMath.sinTableSnapshot()) != 0)
-            {
-                error = "sin 表灌入失败";
-            }
-            else
-            {
-                target = nativeTarget();
-                lanes = nativeLanes();
-                // A/B 用：-Dwizardmagic.spell.native.lanes=1|4|8（0/缺省 = 按 CPU 自动）
-                final int forced = Integer.getInteger("wizardmagic.spell.native.lanes", 0);
-                if (forced > 0)
-                {
-                    final int actual = nativeForceLanes(forced);
-                    if (actual > 0)
-                    {
-                        lanes = actual;
-                    }
-                }
-                loaded = true;
-            }
+            error = NativeLibrary.loadError();
         }
-        catch (UnsatisfiedLinkError | IOException | RuntimeException e)
+        else if (nativeSetSinTable(com.wizardmagic.api.spell.SpellMath.sinTableSnapshot()) != 0)
         {
-            error = e.getClass().getSimpleName() + ": " + e.getMessage();
+            error = "sin 表灌入失败";
+        }
+        else
+        {
+            loaded = true;
         }
         LOADED = loaded;
         LOAD_ERROR = error;
-        TARGET = target;
-        LANES = lanes;
     }
 
     private NativeVm()
@@ -85,7 +52,7 @@ public final class NativeVm
      * 能不能用原生内核。
      *
      * <p>除了"库加载成功"，还要求启动自检通过 —— 由调用方（{@code SpellScripts.warmUp}）
-     * 跑一次指纹对拍后决定是否真的启用；这里只回答"库在不在"。</p>
+     * 跑一次指纹对拍后决定是否真的启用；这里只回答"库在不在 + sin 表灌进去了没有"。</p>
      */
     public static boolean available()
     {
@@ -118,22 +85,22 @@ public final class NativeVm
         return LOAD_ERROR;
     }
 
-    /** 运行期选中的目标名（"AVX2" 等） */
+    /** 运行期选中的 Highway 目标名（"AVX2" 等） */
     public static String target()
     {
-        return TARGET;
+        return NativeLibrary.target();
     }
 
     /** 自动选中的 lane 数（1/4/8）；不可用时 0 */
     public static int lanes()
     {
-        return LANES;
+        return LOADED ? NativeLibrary.lanes() : 0;
     }
 
     /** 强制 lane 数（0 = 自动），返回实际值；不可用或该目标不支持时返回 0 */
     public static int forceLanes(int lanes)
     {
-        return LOADED ? nativeForceLanes(lanes) : 0;
+        return LOADED ? NativeLibrary.forceLanes(lanes) : 0;
     }
 
     /** 注册一段指令流（不可变），返回句柄；0 = 失败 */
@@ -179,52 +146,17 @@ public final class NativeVm
     /** 最近一次失败的说明 */
     public static String lastError()
     {
-        return LOADED ? nativeLastError() : String.valueOf(LOAD_ERROR);
-    }
-
-    // ---------------------------------------------------------------- 加载
-
-    private static void load() throws IOException
-    {
-        // 1) 开发/自检：-Dwizardmagic.native.library=<绝对路径>
-        // 2) 发布：从 jar 里抽到临时目录再 System.load
-        String explicit = System.getProperty("wizardmagic.native.library");
-        if (explicit != null && !explicit.isEmpty())
-        {
-            System.load(Path.of(explicit).toAbsolutePath().toString());
-            return;
-        }
-        try (InputStream in = NativeVm.class.getResourceAsStream(LIB_RESOURCE))
-        {
-            if (in == null)
-            {
-                throw new IOException("jar 里没有 " + LIB_RESOURCE);
-            }
-            Path dir = Files.createTempDirectory("wizardmagic-native");
-            Path dll = dir.resolve("wmvm.dll");
-            Files.copy(in, dll, StandardCopyOption.REPLACE_EXISTING);
-            dll.toFile().deleteOnExit();
-            System.load(dll.toAbsolutePath().toString());
-        }
+        return LOADED ? NativeLibrary.lastError() : String.valueOf(LOAD_ERROR);
     }
 
     /** 诊断串：给启动日志与 /spell debug stats 用 */
     public static String describe()
     {
-        return LOADED
-                ? String.format(Locale.ROOT, "native/%s/%dlane", TARGET, LANES)
+        return LOADED ? NativeLibrary.describe()
                 : "java（原生不可用：" + LOAD_ERROR + "）";
     }
 
-    // ---------------------------------------------------------------- native
-
-    private static native int nativeInit();
-
-    private static native String nativeTarget();
-
-    private static native int nativeLanes();
-
-    private static native int nativeForceLanes(int lanes);
+    // ---------------------------------------------------------------- native（VM 专用）
 
     private static native int nativeSetSinTable(float[] table);
 
@@ -244,6 +176,4 @@ public final class NativeVm
             double originX, double originY, double originZ,
             long seed, int ageStep, double time, int randSeq,
             double[] fv, double[] hv);
-
-    private static native String nativeLastError();
 }

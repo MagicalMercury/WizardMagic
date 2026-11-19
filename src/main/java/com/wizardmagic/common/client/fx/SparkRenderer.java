@@ -33,6 +33,8 @@ public final class SparkRenderer
         // 必须用 AFTER_WEATHER：MC 在 AFTER_PARTICLES 之后才渲染云（LevelRenderer:1393），
         // 而云不写深度、只做混合，会把先前画好的光点整片盖住。
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_WEATHER) {
+            // 只在这个阶段抓视锥：此时 modelview 里才是"世界→相机"，别的阶段可能是单位阵
+            ViewFrustum.capture(event);
             SparkBatch.get().render(event.getCamera(), event.getPartialTick());
         }
     }

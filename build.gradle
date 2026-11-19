@@ -252,7 +252,7 @@ tasks.register('spellNativeCheck', JavaExec) {
     dependsOn 'compileNative'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.wizardmagic.verify.NativeVmCheck'
-    def lib = nativeBuild.file('wmvm/wmvm.dll').asFile
+    def lib = nativeBuild.file('native.dll').asFile
     systemProperty 'wizardmagic.native.library', lib.absolutePath
     systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
     onlyIf { lib.exists() }
@@ -263,8 +263,8 @@ tasks.register('spellNativeCheck', JavaExec) {
 // 没有 DLL 时这一行什么都不做（也不触发 CMake），CI 不受影响。
 tasks.named('processResources', ProcessResources).configure {
     mustRunAfter 'compileNative'   // 保证复制的时候 DLL 已经编好了
-    from(layout.projectDirectory.dir('build-native/wmvm')) {
-        include 'wmvm.dll'
+    from(layout.projectDirectory.dir('build-native')) {
+        include 'native.dll'
         into 'wizardmagic/native/windows/x86_64'
     }
 }
@@ -284,7 +284,7 @@ tasks.register('spellNativeResourceCheck', JavaExec) {
     mainClass = 'com.wizardmagic.verify.NativeVmCheck'
     systemProperty 'wizardmagic.native.mustLoad', '1'
     systemProperty 'wizardmagic.spell.lanes', '0'
-    onlyIf { nativeBuild.file('wmvm/wmvm.dll').asFile.exists() }
+    onlyIf { nativeBuild.file('native.dll').asFile.exists() }
 }
 
 tasks.register('spellParityCheck', JavaExec) {
@@ -293,7 +293,7 @@ tasks.register('spellParityCheck', JavaExec) {
     dependsOn 'compileNative'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.wizardmagic.verify.NativeVmParity'
-    def lib = nativeBuild.file('wmvm/wmvm.dll').asFile
+    def lib = nativeBuild.file('native.dll').asFile
     systemProperty 'wizardmagic.native.library', lib.absolutePath
     systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
     onlyIf { lib.exists() }
@@ -373,6 +373,16 @@ tasks.register('spellMicro', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
     args 'micro'
+}
+
+tasks.register('elementAdvectCheck', JavaExec) {
+    group = 'verification'
+    description = '元素平流：Java / 原生 / 旧实现 三方逐位对拍 + 每格成本'
+    dependsOn 'compileNative'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.core.elements.fluid.ElementAdvectCheck'
+    def lib = nativeBuild.file('native.dll').asFile
+    systemProperty 'wizardmagic.native.library', lib.absolutePath
 }
 
 tasks.register('spellCheck') {

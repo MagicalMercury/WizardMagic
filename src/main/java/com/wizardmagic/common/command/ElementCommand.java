@@ -120,6 +120,10 @@ public final class ElementCommand
         String flowStat = com.wizardmagic.core.elements.flow.ElementBudget.summary("flow");
         String advStat = com.wizardmagic.core.elements.flow.ElementBudget.summary("adv");
         String fluidStat = com.wizardmagic.core.elements.flow.ElementBudget.summary("fluid.total");
+        long advShort = com.wizardmagic.core.elements.flow.ElementBudget.count("adv.short");
+        long advFull = com.wizardmagic.core.elements.flow.ElementBudget.count("adv.full");
+        long advAll = advShort + advFull;
+        double shortPct = advAll == 0 ? 0.0 : 100.0 * advShort / advAll;
         String elementLine = String.format(
                 "元素场：活跃=%d(hot %d) 待生成=%d 待重算=%d（入队 %d / 重算 %d）| noise=%.3f conv=%.3f interp=%.3f hot=%.3f | adv %s | flow %s | %s",
                 active, hotCount, queued, pendingRefresh, enqueuedTotal, processedTotal,
@@ -128,12 +132,15 @@ public final class ElementCommand
         // 完整数据只进日志（INFO），聊天面板给一行摘要
         com.mojang.logging.LogUtils.getLogger().info("[wizardmagic] {}", elementLine);
         com.mojang.logging.LogUtils.getLogger().info("[wizardmagic] {}", fluidLine);
+        com.mojang.logging.LogUtils.getLogger().info("[wizardmagic] 平流分布：无流短路 {} / 有流 {}（短路占 {}%）",
+                advShort, advFull, String.format(java.util.Locale.ROOT, "%.1f", shortPct));
         String shortLine = String.format(
-                "元素场 活跃=%d 待重算=%d | adv %s | flow %s | fluid %s (ms p50/p99)",
+                "元素场 活跃=%d 待重算=%d | adv %s | flow %s | fluid %s (ms p50/p99) | 无流短路 %.1f%%",
                 active, pendingRefresh,
                 com.wizardmagic.core.elements.flow.ElementBudget.shortSummary("adv"),
                 com.wizardmagic.core.elements.flow.ElementBudget.shortSummary("flow"),
-                com.wizardmagic.core.elements.flow.ElementBudget.shortSummary("fluid.total"));
+                com.wizardmagic.core.elements.flow.ElementBudget.shortSummary("fluid.total"),
+                shortPct);
         context.getSource().sendSuccess(() -> Component.literal(shortLine), false);
         return 1;
     }

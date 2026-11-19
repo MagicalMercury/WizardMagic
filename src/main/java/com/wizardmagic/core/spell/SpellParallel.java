@@ -30,8 +30,50 @@ public final class SpellParallel
     }
 
     private static final int THREADS = Math.max(0,
-            Math.min(8, Integer.getInteger("wizardmagic.spell.threads",
+            Math.min(16, Integer.getInteger("wizardmagic.spell.threads",
                     Runtime.getRuntime().availableProcessors() - 1)));
+
+    /** 上一次 dispatch 的统计：总块数 / 调用线程自己干的块数（诊断"池子到底帮了多少"） */
+    private static volatile int lastChunks;
+    private static volatile int lastCallerChunks;
+    private static volatile long lastNanos;
+
+    public static int lastChunks()
+    {
+        return lastChunks;
+    }
+
+    public static int lastCallerChunks()
+    {
+        return lastCallerChunks;
+    }
+
+    public static long lastNanos()
+    {
+        return lastNanos;
+    }
+
+    /**
+     * 上一次 dispatch 里**所有 worker 实际干活的时间之和**（纳秒）。
+     *
+     * <p>和 {@link #lastNanos()}（墙钟）一起用就能算出"有效并行度"和"单粒 CPU 成本"。
+     * 这两个数一分开，"步进慢"到底是"并行没起来"还是"每颗粒子本来就贵"就一眼可见。</p>
+     */
+    public static long lastCpuNanos()
+    {
+        return lastCpuNanos;
+    }
+
+    private static volatile long lastCpuNanos;
+    private static final java.util.concurrent.atomic.LongAdder CPU_NANOS =
+            new java.util.concurrent.atomic.LongAdder();
+
+    /** 调用线程干了多少比例的块（1.0 = 完全没并行） */
+    public static double lastCallerShare()
+    {
+        int c = lastChunks;
+        return c <= 0 ? 1.0 : (double) lastCallerChunks / c;
+    }
 
     /** 段的最小规模：太小的云分给线程池，唤醒成本比算得还贵（本机一次分发 ~50 µs） */
     private static final int MIN_CHUNK = 1024;
@@ -87,20 +129,43 @@ public final class SpellParallel
         if (POOL == null || threads <= 0 || count <= MIN_CHUNK)
         {
             task.run(0, count);
+            lastChunks = 1;
+            lastCallerChunks = 1;
             return;
         }
         // 每线程大约领 CHUNKS_PER_THREAD 块：块太小调度开销大，块太大又会失衡
         int chunk = Math.max(MIN_CHUNK, count / (threads * CHUNKS_PER_THREAD));
         int chunks = (count + chunk - 1) / chunk;
         AtomicInteger next = new AtomicInteger();
+        AtomicInteger callerChunks = new AtomicInteger();
+        final long t0 = System.nanoTime();
         Runnable worker = () ->
         {
             int k;
+            long cpu = 0L;
             while ((k = next.getAndIncrement()) < chunks)
             {
                 int from = k * chunk;
+                long t = System.nanoTime();
                 task.run(from, Math.min(count, from + chunk));
+                cpu += System.nanoTime() - t;
             }
+            CPU_NANOS.add(cpu);
+        };
+        // 调用线程自己的那份：同一段代码，但要单独记账（诊断用）
+        Runnable caller = () ->
+        {
+            int k;
+            long cpu = 0L;
+            while ((k = next.getAndIncrement()) < chunks)
+            {
+                callerChunks.incrementAndGet();
+                int from = k * chunk;
+                long t = System.nanoTime();
+                task.run(from, Math.min(count, from + chunk));
+                cpu += System.nanoTime() - t;
+            }
+            CPU_NANOS.add(cpu);
         };
 
         Future<?>[] futures = new Future<?>[threads];
@@ -114,7 +179,7 @@ public final class SpellParallel
         RuntimeException error = null;
         try
         {
-            worker.run();
+            caller.run();
         }
         catch (RuntimeException e)
         {
@@ -139,6 +204,12 @@ public final class SpellParallel
                 }
             }
         }
+        lastNanos = System.nanoTime() - t0;
+        lastChunks = chunks;
+        lastCallerChunks = callerChunks.get();
+        long cpu = CPU_NANOS.sum();
+        CPU_NANOS.reset();
+        lastCpuNanos = cpu;
         if (error != null)
         {
             throw error;

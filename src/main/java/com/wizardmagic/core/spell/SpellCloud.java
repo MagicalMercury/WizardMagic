@@ -25,7 +25,7 @@ import java.util.UUID;
  * <p>坐标单位：格（blocks）；速度单位：格/秒；{@link #ageSteps()} 是已推进的物理步数
  * （每 {@link SpellConstants#STEP_TICKS} tick 一步）。</p>
  */
-public final class SpellCloud
+public final class SpellCloud implements SpellStateSource
 {
     /** 全局自增 id，客户端靠它认云 */
     public final int id;
@@ -98,6 +98,64 @@ public final class SpellCloud
     private ParticleCollider collider;
 
     private int ageSteps;
+
+    /**
+     * 步版本号（同进程直通用的 seqlock 写端）。
+     *
+     * <p>只在 {@link #finishStep()} 收尾时 +1，且是 volatile 写 —— 带 release 语义，
+     * 所以「读方看到新 epoch」蕴含「看到这一步所有粒子数组的写入」。
+     * 客户端镜像靠它判断"有没有新的一步可以拷"，不需要任何网络往返。</p>
+     */
+    private volatile int stepEpoch;
+
+    /** 这一步的完成时刻（nanoTime），与 {@link #stepEpoch} 配套发布 */
+    private volatile long stepNanos;
+
+    /**
+     * 撕裂探针——写窗口序列号，与 {@link #stepEpoch}（步号）语义分离。
+     *
+     * <p>进入本步写窗口前 +1（奇数 = 写入中），finishStep 收尾后再 +1（偶数 = 本步完成发布）。
+     * 只用于读方检测"拷贝期间是否跨越了变异窗口"，不参与任何步进/发布逻辑。</p>
+     */
+    private volatile int writeSeq;
+
+    @Override
+    public int stepEpoch()
+    {
+        return stepEpoch;
+    }
+
+    @Override
+    public long stepNanos()
+    {
+        return stepNanos;
+    }
+
+    /** 撕裂探针读端：拷贝前后各读一次并比较奇偶，检测拷贝窗口是否跨越了服务端写窗口 */
+    public int writeSeq()
+    {
+        return writeSeq;
+    }
+
+    @Override
+    public int count()
+    {
+        return count;
+    }
+
+    /**
+     * 只推进年龄，不跑物理。
+     *
+     * <p>两处用：① 同进程直通的客户端镜像（物理由权威方跑，本地只管 {@code isDead()} 计时）；
+     * ② 计划 §3 的服务端"远处云只涨年龄"。</p>
+     */
+    public void bumpAge()
+    {
+        if (!broken)
+        {
+            ageSteps++;
+        }
+    }
 
     /**
      * 最近一步的撞击事实（{@link ParticleCollider} 在步末填）。命中 {@code on hit} 用。
@@ -499,6 +557,9 @@ public final class SpellCloud
      */
     public boolean beginStep()
     {
+        // 撕裂探针：进入本步写窗口（奇数 = 写入中）。解释器路径的粒子写入就发生在
+        // beginStep 内部，脚本路径的写入发生在随后的并行阶段——都落在这对 +1 之间。
+        writeSeq++;
         stepKind = KIND_NONE;
         pendingStep = null;
         // 伤害配额是"每步"的：一朵常在的生物云每步都要打人，终身配额会把它提前掐死
@@ -604,6 +665,26 @@ public final class SpellCloud
      * 在所有粒子区间 join 之后做。</p>
      */
     public void finishStep()
+    {
+        try
+        {
+            finishStepInner();
+        }
+        finally
+        {
+            // 同进程直通（单人游戏）的写屏障：这一步的所有粒子/云级写入都已完成，
+            // 才对外发布新 epoch。volatile 写带 release 语义，读方看到新 epoch
+            // 就一定能看到这一步的全部写入，不需要任何锁。
+            // 先写时间戳再写 epoch：读方拿到新 epoch 时，时间戳一定是这一步的。
+            stepNanos = System.nanoTime();
+            stepEpoch++;
+            // 撕裂探针：本步全部写入（含 epoch/时间戳发布）完成，窗口关闭（偶数 = 已发布）。
+            // beginStep 若异常使 writeSeq 停在奇数，后续读全会计数——探针期间可接受。
+            writeSeq++;
+        }
+    }
+
+    private void finishStepInner()
     {
         int kind = stepKind;
         stepKind = KIND_NONE;
@@ -1178,6 +1259,18 @@ public final class SpellCloud
         return z;
     }
 
+    /**
+     * 粒子能量数组（渲染层用）。
+     *
+     * <p>给同进程直通用：{@link SpellStateSource} 的读方要整段拷贝能量，逐粒调用
+     * {@link #energy(int)} 会多一层边界检查和方法调用。</p>
+     */
+    @Override
+    public float[] rawEnergy()
+    {
+        return energy;
+    }
+
     public double[] rawVx()
     {
         return vx;
@@ -1191,11 +1284,6 @@ public final class SpellCloud
     public double[] rawVz()
     {
         return vz;
-    }
-
-    public float[] rawEnergy()
-    {
-        return energy;
     }
 
     public double[] rawAnchorDx()

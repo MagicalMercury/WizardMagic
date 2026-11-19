@@ -120,6 +120,43 @@ public final class FluidField {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
+    /**
+     * 世界方块范围 {@code [wx0, wx0+span) × [wy0, …) × [wz0, …)} 覆盖的粗格里，
+     * <b>是否存在非零速度</b>。
+     *
+     * <p>给元素平流做"整节无流"短路用：返回 {@code false} 时，这一节内任何采样点的
+     * 三线性结果都精确等于 0（全零插值），于是平流退化成恒等 + base 下限。</p>
+     *
+     * <p>范围按 {@link #sample} 的口径算：采样点 clamp 到 {@code [0, N-1]}，
+     * 用到格 {@code i} 与 {@code i+1}，所以两端各放宽一格。</p>
+     */
+    public boolean hasFlowIn(int wx0, int wy0, int wz0, int span) {
+        // sample() 把 g 夹到 [0, N-1] 再用格 i 与 i+1，所以两端各放宽一格，
+        // 并且两个端点都夹回 [0, N-1]：区间单调，夹完仍然 i0 <= i1。
+        int i0 = clamp(Math.floorDiv(wx0 - originX, CELL), 0, N - 1);
+        int i1 = clamp(Math.floorDiv(wx0 + span - 1 - originX, CELL) + 1, 0, N - 1);
+        int j0 = clamp(Math.floorDiv(wy0 - originY, CELL), 0, N - 1);
+        int j1 = clamp(Math.floorDiv(wy0 + span - 1 - originY, CELL) + 1, 0, N - 1);
+        int k0 = clamp(Math.floorDiv(wz0 - originZ, CELL), 0, N - 1);
+        int k1 = clamp(Math.floorDiv(wz0 + span - 1 - originZ, CELL) + 1, 0, N - 1);
+        for (int k = k0; k <= k1; k++) {
+            for (int j = j0; j <= j1; j++) {
+                int row = N * (j + N * k);
+                for (int i = i0; i <= i1; i++) {
+                    int c = i + row;
+                    if (uc[c] != 0f || vc[c] != 0f || wc[c] != 0f) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
     /** 最大散度（诊断用，格单位）。 */
     float maxDivergence() {
         float max = 0f;

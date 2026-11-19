@@ -33,8 +33,12 @@ public final class ElementTickHandler
             return;
         }
 
+        long probe0 = System.nanoTime();
         ChunkElementEvents.processQueue(event.getServer());
+        com.wizardmagic.core.diag.ServerTickProbe.note("chunkQueue", System.nanoTime() - probe0);
+        long probe1 = System.nanoTime();
         ElementRefreshQueue.process(event.getServer(), Config.REFRESH_BUDGET.get());
+        com.wizardmagic.core.diag.ServerTickProbe.note("refreshQ", System.nanoTime() - probe1);
 
         if (!Config.ENABLE_FLOW.get()) {
             return;
@@ -42,7 +46,10 @@ public final class ElementTickHandler
 
         MinecraftServer server = event.getServer();
         for (ServerLevel level : server.getAllLevels()) {
+            long probe2 = System.nanoTime();
             elementFlow(level);
+            // 元素场平流/扩散：**每 tick 每维度**都在跑，是"tick 内重活"的头号嫌疑
+            com.wizardmagic.core.diag.ServerTickProbe.note("elemFlow", System.nanoTime() - probe2);
             com.wizardmagic.core.elements.fluid.FluidManager.tick(level);
         }
     }
@@ -60,11 +67,14 @@ public final class ElementTickHandler
             return;
         }
         if (player.level() instanceof ServerLevel serverLevel) {
+            long probe0 = System.nanoTime();
             ElementFlowScheduler.INSTANCE.addAround(serverLevel, player.chunkPosition(), Config.ACTIVE_RADIUS.get());
             int generationRadius = Config.GENERATION_RADIUS.get();
             if (generationRadius >= 0) {
                 ChunkElementEvents.requestAround(serverLevel, player.chunkPosition(), generationRadius);
             }
+            // 1 Hz 的"玩家周围登记/生成入队"：轻则几毫秒，重则几十毫秒，单独计
+            com.wizardmagic.core.diag.ServerTickProbe.note("elem20", System.nanoTime() - probe0);
         }
     }
 

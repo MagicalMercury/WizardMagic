@@ -140,6 +140,9 @@ public final class ElementFlowScheduler
         if (budget <= 0) {
             return;
         }
+        // 时间预算：按 chunk 个数限流是不够的（活跃集合本身就比 flowBudget 小），
+        // 必须按 ms 切，否则所有 section 的冷却同时到期会把整批工作塌进一个 tick。
+        long deadline = System.nanoTime() + (long) (Config.FLOW_TIME_BUDGET_MS.get() * 1.0e6);
 
         ChunkPos center = playerCenter(level);
 
@@ -150,12 +153,17 @@ public final class ElementFlowScheduler
             sortByDistance(hotOrder, center);
             int hotBudget = Math.max(1, budget / 2);
             for (int i = 0; i < hotOrder.size() && i < hotBudget; i++) {
+                if (System.nanoTime() > deadline) {
+                    break;
+                }
                 ChunkPos pos = hotOrder.get(i);
-                int state = processChunk(level, pos, alpha, beta, now, cooldown);
+                int state = processChunk(level, pos, alpha, beta, now, cooldown, deadline);
                 if (state == STATE_CLEAN) {
                     hotSet.remove(pos);
                 } else if (state == STATE_GONE) {
                     hotSet.remove(pos);
+                } else if (state == STATE_BUDGET) {
+                    break;
                 }
             }
         }
@@ -176,12 +184,18 @@ public final class ElementFlowScheduler
             }
             int processed = 0;
             for (int i = 0; i < order.size() && processed < budget; i++) {
+                if (System.nanoTime() > deadline) {
+                    break;
+                }
                 ChunkPos pos = order.get(i);
-                int state = processChunk(level, pos, alpha, beta, now, cooldown);
+                int state = processChunk(level, pos, alpha, beta, now, cooldown, deadline);
                 if (state == STATE_GONE) {
                     set.remove(pos);
                 }
                 processed++;
+                if (state == STATE_BUDGET) {
+                    break;
+                }
             }
         }
     }
@@ -190,15 +204,22 @@ public final class ElementFlowScheduler
     private static final int STATE_OK = 0;
     private static final int STATE_CLEAN = 1;
     private static final int STATE_GONE = 2;
+    /** 本 tick 的时间预算用完了：这个 chunk 还有没处理完的 section，留着下个 tick 继续 */
+    private static final int STATE_BUDGET = 3;
 
     /**
      * 处理单个 chunk：只对 dirty 且过了冷却的 section 跑一步扩散。
      *
+     * <p>{@code deadline} 是**时间**预算（{@code System.nanoTime()} 时刻）。按 section 粒度检查，
+     * 超时立刻停手：剩下的 section 冷却仍然过期，下个 tick 会被重新捡起来，不会漏。
+     * 没有这个检查时，整批 section 的冷却会同时到期、把 120–150 ms 的活全塌进一个 tick。</p>
+     *
      * @return {@link #STATE_OK} 仍有脏 section；{@link #STATE_CLEAN} 全部收敛；
-     *         {@link #STATE_GONE} chunk 已卸载/未生成
+     *         {@link #STATE_GONE} chunk 已卸载/未生成；
+     *         {@link #STATE_BUDGET} 时间预算用完，本 chunk 还有 section 没处理
      */
     private int processChunk(ServerLevel level, ChunkPos pos, double alpha, double beta,
-                             long now, int cooldown) {
+                             long now, int cooldown, long deadline) {
         LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x, pos.z);
         if (chunk == null) {
             return STATE_GONE;
@@ -210,6 +231,7 @@ public final class ElementFlowScheduler
 
         boolean changed = false;
         boolean anyDirty = false;
+        boolean budgetHit = false;
         boolean fluxMode = Config.FLUX_MODE.get();
         double fluxRate = Config.FLUX_RATE.get();
         int fluxLimit = Config.FLUX_LIMIT.get();
@@ -220,6 +242,13 @@ public final class ElementFlowScheduler
         // 也就是平流一直在用**头顶 64 格处**的流体速度。
         for (Map.Entry<Integer, ElementField> entry : storage.sectionEntries())
         {
+            // 时间预算按 **section** 粒度检查：一个 section 的扩散+平流实测 0.6–2.6 ms，
+            // 所以在 chunk 粒度检查（几十毫秒一个 chunk）没有意义。
+            if (System.nanoTime() > deadline)
+            {
+                budgetHit = true;
+                break;
+            }
             final int si = entry.getKey();
             ElementField field = entry.getValue();
             boolean dirty = field.isDirty();
@@ -256,10 +285,16 @@ public final class ElementFlowScheduler
             } else {
                 field.setDirty(false);
             }
+            // 吞吐核对：时间预算只该"摊开"工作、不该"少做"工作，所以把每秒处理的 section 数记出来
+            com.wizardmagic.core.diag.ServerTickProbe.count("flowSec");
         }
 
         if (changed) {
             chunk.setUnsaved(true);
+        }
+        if (budgetHit) {
+            // 还剩没处理的 section：它们的冷却依然过期，下个 tick 会被重新捡起来
+            return STATE_BUDGET;
         }
         return anyDirty ? STATE_OK : STATE_CLEAN;
     }

@@ -20,18 +20,12 @@ public final class ElementBudget {
         final long[] samples = new long[WINDOW];
         int count;
         int pos;
-        long total;
-        long max;
 
         void add(long nanos) {
             samples[pos] = nanos;
             pos = (pos + 1) % WINDOW;
             if (count < WINDOW) {
                 count++;
-            }
-            total += nanos;
-            if (nanos > max) {
-                max = nanos;
             }
         }
 
@@ -40,10 +34,17 @@ public final class ElementBudget {
                 return "n/a";
             }
             long[] copy = Arrays.copyOf(samples, count);
+            // 均值必须按**窗口内**的样本算：以前用累加的 total / 封顶的 count，
+            // 窗口滑满之后 total 继续涨、count 不再涨，均值会越来越大（实测
+            // adv 的 p50=0.281 ms 却打出 mean=74.480 ms）。
+            long sum = 0L;
+            for (int i = 0; i < count; i++) {
+                sum += copy[i];
+            }
             Arrays.sort(copy);
             long p50 = copy[count / 2];
             long p99 = copy[Math.min(count - 1, (int) (count * 0.99))];
-            double mean = total / (double) count / 1_000_000.0;
+            double mean = sum / (double) count / 1_000_000.0;
             return String.format("p50=%.3f p99=%.3f mean=%.3f n=%d ms",
                     p50 / 1_000_000.0, p99 / 1_000_000.0, mean, count);
         }
@@ -51,19 +52,31 @@ public final class ElementBudget {
         void reset() {
             count = 0;
             pos = 0;
-            total = 0;
-            max = 0;
         }
     }
 
     private static final Map<String, Stat> STATS = new HashMap<>();
 
+    /** 只计数的口径（不需要 p50 的，比如"走了短路几次"） */
+    private static final Map<String, long[]> COUNTS = new HashMap<>();
+
     private ElementBudget() {
     }
 
-    /** 记一次调用耗时（纳秒）。 */
+    /** 记一次调用耗时（纳秒）。单线程使用：元素模拟全程在服务端主线程 */
     public static void record(String name, long nanos) {
         STATS.computeIfAbsent(name, k -> new Stat()).add(nanos);
+    }
+
+    /** 记一次"发生"（不带耗时）。 */
+    public static void bump(String name) {
+        COUNTS.computeIfAbsent(name, k -> new long[1])[0]++;
+    }
+
+    /** 取某个计数口径的累计次数。 */
+    public static long count(String name) {
+        long[] c = COUNTS.get(name);
+        return c == null ? 0L : c[0];
     }
 
     /** 取某口径的 p50/p99 短格式（用于聊天面板，避免刷屏）。 */
@@ -87,5 +100,6 @@ public final class ElementBudget {
 
     public static void reset() {
         STATS.clear();
+        COUNTS.clear();
     }
 }

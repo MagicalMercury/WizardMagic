@@ -27,6 +27,16 @@ public class Config
             .comment("每 tick 最多处理多少个活跃 chunk（按到玩家距离从近到远）")
             .defineInRange("elements.flowBudget", 32, 0, 1024);
 
+    public static final ForgeConfigSpec.DoubleValue FLOW_TIME_BUDGET_MS = BUILDER
+            .comment("每 tick 用于元素扩散/平流的**时间**预算（毫秒）。",
+                    "旧实现只按 chunk 个数限流（flowBudget=32），而活跃集合本身只有 ~25 个 chunk，",
+                    "于是限流形同虚设；所有 section 的冷却又在同一 tick 到期（一批加进来的），",
+                    "结果整批工作塌进一个 tick —— 实测单 tick 尖峰 120–150 ms，正好每 1.5 s 一次，",
+                    "把服务端 tick 顶成追逐节奏、也让法术快照的到达间隔抖成 34–180 ms。",
+                    "按时间切一刀后同样的活摊到 ~20 个 tick 上，单 tick ≤ 该值。",
+                    "取 6 ms：130 ms 的活约 22 tick 排空，短于 flowCooldown(30)，不会堆积。")
+            .defineInRange("elements.flowTimeBudgetMs", 6.0, 1.0, 40.0);
+
     public static final ForgeConfigSpec.IntValue FLOW_INTERVAL = BUILDER
             .comment("每隔多少 tick 扫描一次普通活跃 chunk（被扰动的 chunk 每 tick 都扫描）")
             .defineInRange("elements.flowInterval", 1, 1, 40);

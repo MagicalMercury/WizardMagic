@@ -39,25 +39,25 @@ extern "C"
 {
 
 JNIEXPORT jint JNICALL
-Java_com_wizardmagic_core_spell_script_NativeVm_nativeInit(JNIEnv*, jclass)
+Java_com_wizardmagic_core_jni_NativeLibrary_nativeInit(JNIEnv*, jclass)
 {
     return wmvm_init();
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_wizardmagic_core_spell_script_NativeVm_nativeTarget(JNIEnv* env, jclass)
+Java_com_wizardmagic_core_jni_NativeLibrary_nativeTarget(JNIEnv* env, jclass)
 {
     return env->NewStringUTF(wmvm_target_name());
 }
 
 JNIEXPORT jint JNICALL
-Java_com_wizardmagic_core_spell_script_NativeVm_nativeLanes(JNIEnv*, jclass)
+Java_com_wizardmagic_core_jni_NativeLibrary_nativeLanes(JNIEnv*, jclass)
 {
     return wmvm_lanes();
 }
 
 JNIEXPORT jint JNICALL
-Java_com_wizardmagic_core_spell_script_NativeVm_nativeForceLanes(JNIEnv*, jclass, jint lanes)
+Java_com_wizardmagic_core_jni_NativeLibrary_nativeForceLanes(JNIEnv*, jclass, jint lanes)
 {
     return wmvm_force_lanes(static_cast<int>(lanes));
 }
@@ -238,7 +238,7 @@ Java_com_wizardmagic_core_spell_script_NativeVm_nativeRun(JNIEnv* env, jclass, j
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_wizardmagic_core_spell_script_NativeVm_nativeLastError(JNIEnv* env, jclass)
+Java_com_wizardmagic_core_jni_NativeLibrary_nativeLastError(JNIEnv* env, jclass)
 {
     const char* msg = wmvm_last_error();
     return env->NewStringUTF(msg == nullptr ? "" : msg);
