@@ -399,6 +399,12 @@ int main()
         wmvm_program_destroy(prog);
     }
 
+    // 下面的固定策略基准（7/8 与 §9-11 的变体矩阵）要量"向量内核的裸性能"，
+    // 所以先关掉自适应降级：否则真分歧的程序会在计时途中被自动降级成标量，
+    // 测出来的是"降级后的标量"，而不是"向量内核有多快/多慢"。
+    // 自适应本身在 §12 单独测。
+    wmvm_set_adaptive(0);
+
     // ---------------- 7) noise 基准：3 次/粒（firestorm 的形状）
     {
         Asm s;
@@ -434,7 +440,7 @@ int main()
         const auto t2 = std::chrono::steady_clock::now();
         const double ns1 = std::chrono::duration<double, std::nano>(t1 - t0).count() / (iters * (double) n);
         const double nsN = std::chrono::duration<double, std::nano>(t2 - t1).count() / (iters * (double) n);
-        std::printf("[bench] 3x NOISE   1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (vec_ok=false：两侧都是标量)  (cache hits=%ld misses=%ld)\n",
+        std::printf("[bench] 3x NOISE   1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (cache hits=%ld misses=%ld)\n",
                 ns1, wmvm_lanes(), nsN, ns1 / nsN, wmvm::g_noise_cache.hits, wmvm::g_noise_cache.misses);
         wmvm_force_lanes(0);
         wmvm_program_destroy(prog);
@@ -476,7 +482,7 @@ int main()
         const auto t2 = std::chrono::steady_clock::now();
         const double ns1 = std::chrono::duration<double, std::nano>(t1 - t0).count() / (iters * (double) n);
         const double nsN = std::chrono::duration<double, std::nano>(t2 - t1).count() / (iters * (double) n);
-        std::printf("[bench] 1x if + 20x SCALE  1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (vec_ok=false：两侧都是标量)\n",
+        std::printf("[bench] 1x if + 20x SCALE  1 lane = %.1f ns/粒  %d lane = %.1f ns/粒  倍率 = %.2fx  (条件全真；真分歧的代价见 §9-11)\n",
                 ns1, wmvm_lanes(), nsN, ns1 / nsN);
         wmvm_force_lanes(0);
         wmvm_program_destroy(prog);
@@ -622,6 +628,119 @@ int main()
             expect_true(label, same);
 
             wmvm_force_vec(0);
+            wmvm_force_lanes(0);
+            wmvm_program_destroy(prog);
+        }
+    }
+
+    // ---------------- 12) 自适应降级（默认生产策略）
+    //
+    // 现象：分支"组内全真/全假"时向量 1.26×，"逐粒子分歧"时只有 0.34×。
+    // firestorm 的两个 if 几乎永远全真 —— 所以策略是"先向量跑，统计分歧率，超阈值
+    // 自动永久降级"。这里验三件事：
+    //   1. 全真：分歧计数 0、不降级、仍快于标量 ≥1.10×；
+    //   2. 真分歧：自动降级，降级后不慢于标量 1.2×（不再是 0.34× 悬崖）；
+    //   3. 两种情况下逐位结果都与纯标量一致（降级不能改变数值）。
+    wmvm_set_adaptive(1);
+    {
+        auto buildBranchy = []() -> WmvmProgram* {
+            Asm s;
+            s.op(LPOS, 0, 0, 0);
+            s.op(LDK, 3, 0, 0);
+            s.code.push_back(s.k(0.0));
+            s.op(GT, 4, 0, 3);                 // r4 = px > 0
+            s.op(JZ, 4, 0, 0);
+            const int site = (int) s.code.size();
+            s.code.push_back(-1);
+            s.op(LDK, 5, 0, 0);
+            s.code.push_back(s.k(0.999));
+            for (int i = 0; i < 20; ++i) { s.op(SCALE, 0, 0, 5); }
+            for (int k = 0; k < 3; ++k) { s.op2(NOISE, 6 + k, 0, 1, 2, 3 + k); }
+            for (int k = 0; k < 3; ++k) { s.op(ADD_N, 0, 0, 6 + k); }
+            s.code[site] = (int) s.code.size();
+            s.op(SPOS, 0, 0, 0);
+            return wmvm_program_create(s.code.data(), (int) s.code.size(),
+                    s.consts.data(), (int) s.consts.size());
+        };
+
+        const int n = 4096;
+        std::vector<double> px(n), py(n, 1.0), pz(n, 2.0), vx(n, 0.0), vy(n, 0.0), vz(n, 0.0);
+        std::vector<float> en(n, 1.0f);
+        double fv[8] = {0}, hv[8] = {0};
+
+        for (int ci = 0; ci < 2; ++ci)
+        {
+            const bool divergentCase = ci == 1;
+            WmvmProgram* prog = buildBranchy();
+
+            auto fill = [&]() {
+                for (int i = 0; i < n; ++i)
+                {
+                    px[i] = divergentCase ? ((i & 1) ? 1.0 : -1.0) : 1.0;
+                    py[i] = 1.0;
+                    pz[i] = 2.0;
+                }
+            };
+            auto runAuto = [&]() {
+                wmvm_force_lanes(0);
+                wmvm_force_vec(0);
+                fill();
+                WmvmBatch bb = make_batch(n, px, py, pz, vx, vy, vz, en);
+                return wmvm_run(prog, &bb, fv, hv);
+            };
+            auto runScalar = [&]() {
+                wmvm_force_lanes(1);
+                fill();
+                WmvmBatch bb = make_batch(n, px, py, pz, vx, vy, vz, en);
+                return wmvm_run(prog, &bb, fv, hv);
+            };
+
+            wmvm_program_reset_stats(prog);
+            for (int w = 0; w < 5; ++w) { runAuto(); }
+            int jzTotal = 0;
+            int jzDiv = 0;
+            int downgraded = 0;
+            wmvm_program_stats(prog, &jzTotal, &jzDiv, &downgraded);
+
+            const int iters = 100;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < iters; ++i) { runAuto(); }
+            const auto t1 = std::chrono::steady_clock::now();
+            for (int i = 0; i < iters; ++i) { runScalar(); }
+            const auto t2 = std::chrono::steady_clock::now();
+            const double nsAuto = std::chrono::duration<double, std::nano>(t1 - t0).count() / (iters * (double) n);
+            const double ns1 = std::chrono::duration<double, std::nano>(t2 - t1).count() / (iters * (double) n);
+            std::printf("[adapt] %-30s jz=%d div=%d down=%d  auto=%.1f  1lane=%.1f  比=%.2fx\n",
+                    divergentCase ? "真分歧（相邻粒子条件相反）" : "条件全真（firestorm 常态）",
+                    jzTotal, jzDiv, downgraded, nsAuto, ns1, ns1 / nsAuto);
+
+            if (divergentCase)
+            {
+                expect_true("自适应：真分歧自动降级", downgraded == 1);
+                expect_true("自适应：降级后不慢于标量 1.2x", nsAuto <= ns1 * 1.2);
+            }
+            else
+            {
+                expect_true("自适应：全真保持向量（不降级）", downgraded == 0);
+                expect_true("自适应：全真分歧计数为 0", jzDiv == 0);
+                expect_true("自适应：全真仍快于标量 1.10x", nsAuto <= ns1 / 1.10);
+            }
+
+            // 逐位一致：自适应（向量 / 已降级）跑出来的坐标必须与纯标量逐位相同
+            runScalar();
+            std::vector<double> refX = px;
+            std::vector<double> refY = py;
+            std::vector<double> refZ = pz;
+            runAuto();
+            bool same = true;
+            for (int i = 0; i < n && same; ++i)
+            {
+                same = bits(px[i]) == bits(refX[i]) && bits(py[i]) == bits(refY[i])
+                        && bits(pz[i]) == bits(refZ[i]);
+            }
+            expect_true(divergentCase ? "逐位一致（自适应已降级 vs 标量）"
+                                      : "逐位一致（自适应向量 vs 标量）", same);
+
             wmvm_force_lanes(0);
             wmvm_program_destroy(prog);
         }

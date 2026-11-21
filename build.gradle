@@ -382,6 +382,37 @@ tasks.register('spellMicro', JavaExec) {
     args 'micro'
 }
 
+// 原生 VM 的端到端每粒成本（同一份火焰风暴脚本走 FastProgram → JNI 原生内核）。
+// 用 -Planes=1 强制标量内核做 A/B，对比默认（自适应，分支全真时保持 4/8 lane 向量）。
+tasks.register('spellNativePerf', JavaExec) {
+    group = 'verification'
+    description = '原生 VM 每粒成本（默认 micro=best-of 最稳；-Pmode=perf 看拆分；-Planes=1 强制标量；-Pnative=0 走纯 Java）'
+    dependsOn 'compileNative'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
+    args (project.findProperty('mode') ?: 'micro').toString()
+    def lib = nativeBuild.file('native.dll').asFile
+    systemProperty 'wizardmagic.native.library', lib.absolutePath
+    systemProperty 'wizardmagic.spell.lanes', (project.findProperty('lanes') ?: '0').toString()
+    // 真正作用于原生内核的 lane 数（0 = 自动；1 = 强制标量，用于 A/B）
+    systemProperty 'wizardmagic.native.perf.lanes', (project.findProperty('lanes') ?: '0').toString()
+    // -Pnative=0 关掉原生后端（量纯 Java 字节码路径，用来确认 A/B 真的走了不同后端）
+    systemProperty 'wizardmagic.spell.native', (project.findProperty('native') ?: '1').toString()
+    // -Ptrace=1 打开原生侧的自适应降级诊断（stderr 打降级现场与分歧率）
+    if (project.findProperty('trace') != null) {
+        environment 'WMVM_TRACE_DIVERGENCE', '1'
+    }
+    // -Pifconv=0 关掉 if-conversion（A/B 用）
+    if (project.findProperty('ifconv') != null) {
+        systemProperty 'wizardmagic.spell.ifconv', project.findProperty('ifconv').toString()
+    }
+    // -Pdbg=1 打印"为什么某个脚本没编出快速路径"（退化原因打到 stderr）
+    if (project.findProperty('dbg') != null) {
+        systemProperty 'wizardmagic.script.debug', '1'
+    }
+    onlyIf { lib.exists() }
+}
+
 tasks.register('elementAdvectCheck', JavaExec) {
     group = 'verification'
     description = '元素平流：Java / 原生 / 旧实现 三方逐位对拍 + 每格成本'

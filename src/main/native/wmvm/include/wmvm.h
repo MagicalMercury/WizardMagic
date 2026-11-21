@@ -92,6 +92,35 @@ int wmvm_force_lanes(int lanes);
  */
 int wmvm_force_vec(int on);
 
+/**
+ * 自适应降级开关（默认开）。
+ *
+ * <p>背景：向量内核遇到"组内分歧"的分支时两条路都要跑，实测掉到 <b>0.34×</b>；
+ * 但分支<b>全真/全假</b>时是 <b>1.26×</b>。firestorm 的两个 if 几乎永远全真，
+ * 一刀切禁掉向量是白丢 26%。所以默认策略是：含分支照样先走向量，运行期统计分歧率，
+ * 超阈值就把这个程序永久降级到标量。</p>
+ *
+ * @param on 0 = 关（回到"含分支就标量"以外的固定策略，供 A/B 用），非 0 = 开
+ * @return 生效后的值
+ */
+int wmvm_set_adaptive(int on);
+
+/** 分歧率阈值（百分比，默认 10）。累计分歧次数占比超过它即降级。 */
+int wmvm_set_adapt_divergence_pct(int pct);
+
+/**
+ * 读一个程序的运行期统计（诊断/自检用）。
+ *
+ * @param jzTotal     向量内核里已求值的分支次数（每 JZ × 每 lane 组算一次），可为 NULL
+ * @param jzDivergent 其中"组内既有人跳也有人不跳"的次数，可为 NULL
+ * @param downgraded  1 = 已被自适应降级为标量，可为 NULL
+ * @return 0 = 成功
+ */
+int wmvm_program_stats(const WmvmProgram* p, int* jzTotal, int* jzDivergent, int* downgraded);
+
+/** 清零统计并把 keep_scalar 复位（自检/基准里做 A/B 用）。 */
+void wmvm_program_reset_stats(WmvmProgram* p);
+
 /** sin 查表数据（65536 项 float，与 Java SpellMath 同一张表）。不设置就不能用 sin/cos。 */
 int wmvm_set_sin_table(const float* table, int count);
 

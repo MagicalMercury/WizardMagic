@@ -47,7 +47,8 @@ inline bool bit_of(uint32_t bits, int l)
 }
 
 template <class D>
-int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* hv)
+int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* hv,
+        int* jzSeen, int* jzDivergent)
 {
     using V = Vec<D>;
     using M = Mask<D>;
@@ -478,14 +479,31 @@ int Run(D d, const ::wmvm::Program& p, WmvmBatch& b, double* fv, const double* h
                     else
                     {
                         Store(r[dst], d, tmp);
+                        // 分歧统计（自适应降级的唯一依据）：这一组里既有人跳也有人不跳
+                        // = 两条路都得跑，实测掉到 0.34×。全真/全假则和标量同价。
+                        int nLane = 0;
+                        int nTake = 0;
                         for (int l = 0; l < L; ++l)
                         {
                             if (!bit_of(group, l))
                             {
                                 continue;
                             }
+                            ++nLane;
                             const bool take = (op == ::wmvm::OP_JZ) ? (tmp[l] == 0.0) : (tmp[l] != 0.0);
+                            if (take)
+                            {
+                                ++nTake;
+                            }
                             pcs[l] = take ? target : next;
+                        }
+                        if (nLane > 1)
+                        {
+                            ++(*jzSeen);
+                            if (nTake != 0 && nTake != nLane)
+                            {
+                                ++(*jzDivergent);
+                            }
                         }
                     }
                     break;

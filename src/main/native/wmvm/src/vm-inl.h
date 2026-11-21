@@ -10,6 +10,7 @@
 #ifndef WMVM_VM_INL_H
 #define WMVM_VM_INL_H
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -103,12 +104,26 @@ struct Program
     /**
      * 能不能走向量内核。
      *
-     * <p>判据是<b>只有分支</b>（JZ/JMP/JNZ）：组内分歧时两条路都要跑，实测掉到 0.49×。
+     * <p>判据是<b>只有分支</b>（JZ/JMP/JNZ）：组内分歧时两条路都要跑，实测掉到 0.34×。
      * noise 曾经也在黑名单里，但那是 {@code value3} 没被内联造成的假象（每次调用多付
      * ~90 ns）——加上 always_inline 之后 noise 是中性（1.0×），混进算术里还能吃到
      * 1.27×，所以现在放行。实测见 selftest 的 bench 区。</p>
+     *
+     * <p><b>现在默认不再因分支直接否决</b>：改成"先向量跑，运行期统计分歧率，超阈值自动
+     * 降级"（见 {@link #keep_scalar}）。理由：实测分支<b>全真</b>时向量是 1.26×，
+     * 而 firestorm 的两个 if 几乎永远全真；一刀切禁掉等于白丢 26%。</p>
      */
     bool vec_ok = true;
+    /** 含任何分支指令（决定要不要开自适应统计） */
+    bool has_branch = false;
+
+    // ---- 运行期分歧统计与自适应降级（可能被多个 worker 线程并发调用，故用 atomic）----
+    /** 向量内核里已求值的分支次数（每个 JZ × 每个 lane 组算一次） */
+    mutable std::atomic<uint64_t> jz_total{0};
+    /** 其中"组内既有人跳也有人不跳"的次数 */
+    mutable std::atomic<uint64_t> jz_div{0};
+    /** 自适应判定后置真：此程序以后一律走标量（避免 0.34× 的灾难） */
+    mutable std::atomic<bool> keep_scalar{false};
 };
 
 /** 每个线程最近一次的失败说明 */

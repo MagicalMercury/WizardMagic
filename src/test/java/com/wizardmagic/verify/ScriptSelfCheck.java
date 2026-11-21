@@ -45,6 +45,15 @@ public final class ScriptSelfCheck
 
     public static void main(String[] args) throws Exception
     {
+        // 可选：强制原生内核的 lane 数（0 = 自动），用于 A/B 标量 vs 向量（对 micro / perf 都生效）。
+        // 注意 -Dwizardmagic.spell.lanes 是给旧的 Java RegVm4 用的，与原生内核无关。
+        String lanes = System.getProperty("wizardmagic.native.perf.lanes");
+        if (lanes != null && com.wizardmagic.core.spell.script.NativeVm.available())
+        {
+            int forced = com.wizardmagic.core.spell.script.NativeVm.forceLanes(Integer.parseInt(lanes));
+            System.out.println("[bench] 原生后端：" + com.wizardmagic.core.spell.script.NativeVm.describe()
+                    + " forceLanes(" + lanes + ") → " + forced);
+        }
         if (args.length > 0 && args[0].equals("perf"))
         {
             // 单独测：一个新 JVM 里只跑火焰风暴，避免多个脚本共用 runLoop 反复 deopt
@@ -1147,6 +1156,37 @@ public final class ScriptSelfCheck
                 nsPerParticle(tiny, 3000L));
         System.out.printf(java.util.Locale.ROOT, "[micro] 火焰风暴     %.1f ns/粒%n",
                 nsPerParticle(SpellScript.compile("firestorm", load("firestorm")), 3000L));
+        // if-conversion 的收益只在"条件逐粒子分歧"时才体现：
+        // ifconv=0 时这里是 JZ（组内分歧 ⇒ 原生自适应降级回标量），
+        // ifconv=1 时编译成 SELECT（无分支 ⇒ 仍走向量）。
+        // 注意：`let k = 1.0` 这种"循环不变"的初值会被 LICM 外提，随后 if 里的 k = ... 就成了
+        // "给外提量赋值" ⇒ 整个 tick 直接退化到解释器（~200 ns/粒，慢 20 倍）。
+        // 所以基准里让 k 依赖粒子属性（每粒不同 ⇒ 不会被外提），条件用高度（真分歧）。
+        String divergent = "on cast { emit { element: fire, count: 8192, life: 240 } }\n"
+                + "on tick(dt) {\n"
+                + "  for p in particles {\n"
+                + "    let k = p.energy * 0.01\n"
+                + "    if (p.pos.y > 64) { k = k + 1.0 }\n"
+                + "    p.v = p.v * k\n"
+                + "    p.pos = p.pos + p.v * dt\n"
+                + "  }\n"
+                + "}\n";
+        System.out.printf(java.util.Locale.ROOT, "[micro] 分歧脚本     %.1f ns/粒%n",
+                nsPerParticle(SpellScript.compile("divergent", divergent), 3000L));
+        // 曾经的"悬崖"：let 初值循环不变、体内又被赋值 ⇒ 旧 LICM 把它外提、随后的赋值
+        // 触发 Unsupported ⇒ 整个 tick 掉进解释器（实测 196 ns/粒，比快路径慢 13 倍）。
+        // 现在这类 let 不再外提，正常编进快路径。这条基准就是钉住它别再回退。
+        String hoistTrap = "on cast { emit { element: fire, count: 8192, life: 240 } }\n"
+                + "on tick(dt) {\n"
+                + "  for p in particles {\n"
+                + "    let k = 1.0\n"
+                + "    if (p.pos.y > 64) { k = 1.5 }\n"
+                + "    p.v = p.v * k\n"
+                + "    p.pos = p.pos + p.v * dt\n"
+                + "  }\n"
+                + "}\n";
+        System.out.printf(java.util.Locale.ROOT, "[micro] 外提坑脚本   %.1f ns/粒%n",
+                nsPerParticle(SpellScript.compile("hoistTrap", hoistTrap), 3000L));
         System.out.println("[micro] fire=" + fire);
     }
 
