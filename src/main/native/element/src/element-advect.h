@@ -67,11 +67,31 @@ struct Input
 };
 
 /**
- * 对单个 section 跑一步平流。
+ * 对单个 section 跑一步平流（带运行期分派的正门）。
+ *
+ * 默认走向量内核，`WMVM_ELEMENT_SIMD=0` 退回标量；两条路逐位一致。
  *
  * @return 位组合：bit0 = 有元素被改动，bit1 = 走的是「无流短路」路径；负数 = 参数错误。
  */
 int advect(const Input& in);
+
+/** 纯标量内核（`advect` 的回退路，也是向量内核里"部分格活着"时用的路） */
+int advect_scalar(const Input& in);
+
+/**
+ * 向量内核：一个字节字（4 个元素通道）占用 4 条 lane 并行。
+ *
+ * AVX2 = 4 lane（一次 1 格）；AVX-512 = 8 lane（一次 2 格）；
+ * SSE2/SSSE3 = 没有 4×double 寄存器可用，直接内部转调 `advect_scalar`。
+ * 与 `advect_scalar` 逐位一致（同一 double 运算顺序、同一条取整规则）。
+ */
+int advect_simd(const Input& in);
+
+/** 当前 CPU 上实际选中的向量宽度（0 = 落到标量回落），诊断/基准用 */
+int advect_simd_lanes();
+
+/** 当前 CPU 上实际选中的 Highway 目标名，诊断/基准用 */
+const char* advect_simd_target();
 
 }  // namespace element
 }  // namespace wmvm

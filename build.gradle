@@ -415,12 +415,16 @@ tasks.register('spellNativePerf', JavaExec) {
 
 tasks.register('elementAdvectCheck', JavaExec) {
     group = 'verification'
-    description = '元素平流：Java / 原生 / 旧实现 三方逐位对拍 + 每格成本'
+    description = '元素平流：Java / 原生 / 旧实现 三方逐位对拍 + 每格成本（-Psimd=0 关向量内核做 A/B）'
     dependsOn 'compileNative'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.wizardmagic.core.elements.fluid.ElementAdvectCheck'
     def lib = nativeBuild.file('native.dll').asFile
     systemProperty 'wizardmagic.native.library', lib.absolutePath
+    // 向量内核 A/B：-Psimd=0 走标量内核（原生侧读一次环境变量就缓存）
+    if (project.findProperty('simd') != null) {
+        environment 'WMVM_ELEMENT_SIMD', project.findProperty('simd').toString()
+    }
 }
 
 tasks.register('spellCheck') {
