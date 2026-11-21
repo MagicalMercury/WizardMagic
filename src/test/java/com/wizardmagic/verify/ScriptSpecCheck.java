@@ -1232,6 +1232,26 @@ public final class ScriptSpecCheck
                 reasonOf("let g = 1", "for p in particles { p.pos.x = p.pos.x + g }") == null);
         check("读 vec3 型 cast 变量能编",
                 reasonOf("let v = vec(1, 2, 3)", "for p in particles { p.pos = p.pos + v * dt }") == null);
+        // 循环内 let 的初值循环不变、但体内又被赋值：不能被 LICM 外提。
+        // 外提之后体内那句就变成"给外提量赋值" ⇒ 整段 Unsupported ⇒ 掉到解释器（实测 ~13×）。
+        check("循环内 let 被条件赋值也能编进快速路径",
+                reasonOf("", "for p in particles {\n"
+                        + "  let k = 1.0\n"
+                        + "  if (p.pos.y > 64) { k = 1.5 }\n"
+                        + "  p.pos.x = p.pos.x + k\n"
+                        + "}") == null);
+        check("循环内 let 被条件赋值：不再报「给外提量赋值」",
+                !contains(reasonOf("", "for p in particles {\n"
+                        + "  let k = 1.0\n"
+                        + "  if (p.pos.y > 64) { k = 1.5 }\n"
+                        + "  p.pos.x = p.pos.x + k\n"
+                        + "}"), "外提量"));
+        check("循环内 let 被条件赋值的语义与解释器逐位一致（30 步）",
+                sameHash("for p in particles {\n"
+                        + "  let k = p.pos.y * 0.01\n"
+                        + "  if (p.pos.y > 64) { k = k + 1.0 }\n"
+                        + "  p.pos.x = p.pos.x + k * 0.01\n"
+                        + "}", 30));
     }
 
     // ------------------------------------------------------------ 快路径覆盖
@@ -1307,8 +1327,11 @@ public final class ScriptSpecCheck
                 "for p in particles { hits = hits + 1 }\nfor p in particles { hits = hits + 1 }"),
                 "单个粒子循环"));
         check("给内置量赋值 → 退化并说明原因", contains(reasonOf("", "for p in particles { dt = 1 }"), "内置量"));
-        check("给外提量赋值 → 退化并说明原因", contains(reasonOf("",
-                "for p in particles { let k = 1\n k = 2 }"), "外提量"));
+        // 以前这条是"给外提量赋值 → 退化并说明原因"：体内给 let 赋值时它被 LICM 外提，
+        // 于是那句赋值抛 Unsupported，整段掉进解释器（13×）。现在体内被赋值的 let 不再外提，
+        // 这种写法直接能编 —— 所以用例改成断言"能编出快速路径"。
+        check("循环内 let 被赋值时不再外提（能编出快速路径）",
+                reasonOf("", "for p in particles { let k = 1\n k = 2\n p.pos.x = p.pos.x + k }") == null);
     }
 
     // ------------------------------------------------------------ 字节码往返

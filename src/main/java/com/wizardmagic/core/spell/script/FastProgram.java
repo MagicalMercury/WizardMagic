@@ -175,6 +175,20 @@ final class FastProgram
     private static final boolean LICM =
             !"0".equals(System.getProperty("wizardmagic.spell.licm"));
 
+    /**
+     * if-conversion（JZ→SELECT）开关：{@code -Dwizardmagic.spell.ifconv=0} 关闭（A/B 对照用）。
+     *
+     * <p>把"两条分支都是给同一个 let 赋纯表达式"的 if 编译成 SELECT 而不是 JZ，
+     * 好处是这一分支不会让向量内核撞上"组内分歧"（JZ 分歧 0.34× vs SELECT 1.22×）。
+     * 关掉它回到 JZ 版本，用来量这一步到底值多少。</p>
+     */
+    private static final boolean IFCONV =
+            !"0".equals(System.getProperty("wizardmagic.spell.ifconv"));
+
+    /** if-conversion 的判据被拒原因（{@code -Dwizardmagic.spell.ifconv.debug=1} 打到 stderr） */
+    private static final boolean IFCONV_DEBUG =
+            System.getProperty("wizardmagic.spell.ifconv.debug") != null;
+
     private final List<Object> segments = new ArrayList<>();
     private final int loopCount;
     /** 能不能按粒子区间切段并行（{@code rand()} 会把它压成 false，见 {@link #parallelSafe()}） */
@@ -852,6 +866,28 @@ final class FastProgram
             {
                 collectLets(branch.then(), out);
                 collectLets(branch.otherwise(), out);
+            }
+        }
+    }
+
+    /**
+     * 收集循环体里（含 if 分支内）被赋值过的名字。
+     *
+     * <p>用途见 {@code Codegen.assignedInBody}：这类名字如果又是 {@code let}，就**不能外提**，
+     * 否则体内那句赋值会抛 Unsupported，整段掉进解释器。</p>
+     */
+    private static void collectAssigned(List<Ast.Stmt> body, java.util.Set<String> out)
+    {
+        for (Ast.Stmt s : body)
+        {
+            if (s instanceof Ast.Assign a)
+            {
+                out.add(a.base());
+            }
+            else if (s instanceof Ast.If branch)
+            {
+                collectAssigned(branch.then(), out);
+                collectAssigned(branch.otherwise(), out);
             }
         }
     }
@@ -1955,6 +1991,15 @@ final class FastProgram
         private final Map<String, Integer> hoistKeys = new HashMap<>();
         /** 循环体里被赋过值的自由变量名：这些名字不能参与外提（值在 body 内会变） */
         private java.util.Set<String> writtenVars = java.util.Set.of();
+        /**
+         * 循环体里（含 if 分支内）被赋值过的名字。
+         *
+         * <p>外提判据要连这个一起看：{@code let k = 1.0} 的初值虽然循环不变，但只要体内
+         * 还有 {@code k = ...}，外提之后那句就变成"给外提量赋值" ⇒ 整个 tick 抛
+         * Unsupported ⇒ **整段退化到解释器**（实测 ~196 ns/粒 vs 快路径 ~15 ns/粒，13 倍）。
+         * 这是"写法看起来完全正常却掉 20 倍"的悬崖，所以不外提这类 let。</p>
+         */
+        private java.util.Set<String> assignedInBody = java.util.Set.of();
 
         Codegen(Loop loop, Scope top, java.util.Set<String> writable)
         {
@@ -1970,6 +2015,11 @@ final class FastProgram
             {
                 letOrdinals.put(lets.get(i), i);
             }
+            // 体内被赋过值的名字：其中的 let 一律不外提（外提会让那句赋值直接抛 Unsupported，
+            // 整段掉进解释器）
+            java.util.Set<String> assigned = new java.util.LinkedHashSet<>();
+            collectAssigned(body, assigned);
+            assignedInBody = assigned;
             Scope sc = new Scope(top, null);
             sc.declare(varName, T.PARTICLE, -1);
             Usage use = analyze(body, varName);
@@ -2513,7 +2563,8 @@ final class FastProgram
             {
                 throw new Unsupported("循环体里的 let 只能是 num / bool / vec3");
             }
-            if (ifDepth == 0 && t != T.BOOL && independent(let.value(), sc))
+            if (ifDepth == 0 && t != T.BOOL && independent(let.value(), sc)
+                    && !assignedInBody.contains(let.name()))
             {
                 // 与粒子无关：每步算一次，循环里只读
                 Hoist h = new Hoist();
@@ -2544,6 +2595,15 @@ final class FastProgram
             int base = nextReg;
             int cond = alloc(T.BOOL);
             expr(branch.cond(), sc, cond);
+            // 先试 if-conversion（两条分支都是"给同一个 let 赋纯表达式"时改成 SELECT）。
+            // 保住 cond 槽（nextReg 停在 cond+1），否则 saved/thenVal 会盖掉它。
+            nextReg = cond + 1;
+            if (tryIfConvert(branch, sc, cond))
+            {
+                nextReg = base;
+                return;
+            }
+            nextReg = base;
             emit2(OP_JZ, cond, 0);
             int jzTarget = code.add(-1);
 
@@ -2581,8 +2641,178 @@ final class FastProgram
             nextReg = base;
         }
 
-        private void assign(Ast.Assign a, Scope sc)
+        /**
+         * if-conversion：把
+         * <pre>
+         *   if (c) { x = A } else { x = B }        // A/B 都是纯表达式，x 是同一个 let
+         * </pre>
+         * 改写成"两路都算，再 SELECT 挑一个"，指令流里不再有 JZ。
+         *
+         * <p><b>为什么要这一步</b>：向量内核撞上"组内分歧"的 JZ 时两条路都要跑，实测掉到
+         * <b>0.34×</b>；而同一份程序用 SELECT 表达时，即使条件逐粒子相反也有 <b>1.22×</b>
+         * （见 {@code native/wmvm/selftest} 的 §9-11）。所以"含分支 ⇒ 跑标量"之外还有第三条路：
+         * 把可 if-conversion 的分支编译成 SELECT，让分歧型脚本也能吃到向量收益。</p>
+         *
+         * <p><b>保守判据</b>（任一不满足就退回 JZ，行为不变）：</p>
+         * <ul>
+         *   <li>两条分支各只有**一条**赋值语句，目标是同一个**纯寄存器**（{@code let}），不是
+         *       {@code p.v} 这类属性链，也不是新声明的 let；</li>
+         *   <li>右值是**纯表达式**：不含 {@code /}、{@code %}（除零会抛错，两路都算会凭空报错）、
+         *       {@code rand}（两路都算会把随机序列吃掉）、{@code tangent}/{@code radial}
+         *       （退化轴向会抛错）；</li>
+         *   <li>两边类型一致且是 num/vec3；</li>
+         *   <li>没有 {@code else} 也可以（else 值 = 进入 if 之前的旧值）。</li>
+         * </ul>
+         *
+         * @return true = 已经按 SELECT 发完指令（调用方不要再发 JZ/JMP）
+         */
+        private boolean tryIfConvert(Ast.If branch, Scope sc, int cond)
         {
+            if (!IFCONV)
+            {
+                return false;
+            }
+            String why = null;
+            Ast.Assign thenA = soleAssign(branch.then());
+            if (thenA == null || !thenA.path().isEmpty() || !thenA.op().isEmpty())
+            {
+                why = "then 体不是单条 let 赋值（size=" + branch.then().size() + "，首节点="
+                        + (branch.then().isEmpty() ? "-" : branch.then().get(0).getClass().getSimpleName())
+                        + (thenA != null ? "，op=" + thenA.op() + "，path=" + thenA.path() : "") + "）";
+            }
+            Ast.Assign elseA = null;
+            if (why == null && !branch.otherwise().isEmpty())
+            {
+                elseA = soleAssign(branch.otherwise());
+                if (elseA == null || !elseA.path().isEmpty() || !elseA.op().isEmpty()
+                        || !elseA.base().equals(thenA.base()))
+                {
+                    why = "else 体形态不匹配";
+                }
+            }
+            Integer slot = why == null ? sc.slot(thenA.base()) : null;
+            if (why == null && slot == null)
+            {
+                why = "目标 " + thenA.base() + " 不是本作用域的纯寄存器";
+            }
+            T t = why == null ? typeOf(thenA.value(), sc) : T.BOOL;
+            if (why == null && t != T.NUM && t != T.VEC3)
+            {
+                why = "类型不是 num/vec3: " + t;
+            }
+            if (why == null && sc.type(thenA.base()) != t)
+            {
+                // 需要隐式转换时不做（两路写法可能不一致）
+                why = "目标类型 " + sc.type(thenA.base()) + " 与右值 " + t + " 不一致";
+            }
+            if (why == null && !pure(thenA.value()))
+            {
+                why = "then 右值不纯（含 / % rand tangent radial 等）";
+            }
+            if (why == null && elseA != null && (typeOf(elseA.value(), sc) != t || !pure(elseA.value())))
+            {
+                why = "else 右值类型不符或不纯";
+            }
+            if (why != null)
+            {
+                if (IFCONV_DEBUG)
+                {
+                    System.err.println("[ifconv] 跳过（第 " + branch.line() + " 行）：" + why);
+                }
+                return false;
+            }
+            final int w = width(t);
+            final int dst = slot;
+            final int saved = alloc(t);      // 进 if 之前的旧值
+            final int thenVal = alloc(t);    // then 路的结果
+            copyReg(w, saved, dst);
+            int bodyBase = nextReg;
+            ifDepth++;
+            stmt(thenA, new Scope(sc, null));
+            ifDepth--;
+            copyReg(w, thenVal, dst);
+            nextReg = bodyBase;
+            copyReg(w, dst, saved);          // 先恢复成旧值，给 else 当输入
+            if (elseA != null)
+            {
+                ifDepth++;
+                stmt(elseA, new Scope(sc, null));
+                ifDepth--;
+                nextReg = bodyBase;
+            }
+            // dst = cond ? thenVal : dst（vec3 是三个连续槽，逐个 SELECT）
+            for (int c = 0; c < w; c++)
+            {
+                emit3(OP_SELECT, dst + c, cond, thenVal + c);
+                code.add(dst + c);
+            }
+            return true;
+        }
+
+        /** 分支体恰好是一条赋值语句时返回它，否则 null */
+        private static Ast.Assign soleAssign(java.util.List<Ast.Stmt> body)
+        {
+            if (body.size() != 1 || !(body.get(0) instanceof Ast.Assign a))
+            {
+                return null;
+            }
+            return a;
+        }
+
+        private void copyReg(int w, int dst, int src)
+        {
+            emit2(w == 3 ? OP_MOV3 : OP_MOV, dst, src);
+        }
+
+        /**
+         * 纯表达式：可以两路都求值、不会抛错、不消耗随机序列。
+         *
+         * <p>排除 {@code /}、{@code %}（除零会在运行期把云标记 broken —— 两路都算等于凭空制造
+         * 一个会被走到的错误）、{@code rand}（序列会多消耗）、{@code tangent}/{@code radial}
+         * （轴向退化会抛错）。</p>
+         */
+        private boolean pure(Ast.Expr e)
+        {
+            if (e instanceof Ast.NumLit || e instanceof Ast.BoolLit || e instanceof Ast.Var)
+            {
+                return true;
+            }
+            if (e instanceof Ast.Member m)
+            {
+                return pure(m.base());
+            }
+            if (e instanceof Ast.Unary u)
+            {
+                return pure(u.e());
+            }
+            if (e instanceof Ast.Binary b)
+            {
+                if ("/".equals(b.op()) || "%".equals(b.op()))
+                {
+                    return false;
+                }
+                return pure(b.a()) && pure(b.b());
+            }
+            if (e instanceof Ast.Call c)
+            {
+                String fn = c.fn();
+                if ("rand".equals(fn) || "tangent".equals(fn) || "radial".equals(fn))
+                {
+                    return false;
+                }
+                for (Ast.Expr arg : c.args())
+                {
+                    if (!pure(arg))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;   // 字符串 / 记录构造 等
+        }
+
+        private void assign(Ast.Assign a, Scope sc)        {
             T rhs = typeOf(a.value(), sc);
 
             if (a.path().isEmpty())

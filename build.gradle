@@ -317,6 +317,13 @@ tasks.register('spellScriptCheck', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.wizardmagic.verify.ScriptSelfCheck'
     args 'quick'
+    // -Pifdbg=1 打印 if-conversion 的判据拒绝原因；-Pifconv=0 关掉这一步做 A/B
+    if (project.findProperty('ifdbg') != null) {
+        systemProperty 'wizardmagic.spell.ifconv.debug', '1'
+    }
+    if (project.findProperty('ifconv') != null) {
+        systemProperty 'wizardmagic.spell.ifconv', project.findProperty('ifconv').toString()
+    }
 }
 
 // 脚本语言"语义"专项：运算符/短路/类型/内建/emit 校验/编译期检查/运行期定位/
